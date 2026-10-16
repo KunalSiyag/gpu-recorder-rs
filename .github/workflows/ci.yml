@@ -1,0 +1,43 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build & Test (Ubuntu Wayland/GTK4)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux Wayland, GTK4, DRM & PipeWire dev packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config clang ffmpeg \
+            libgtk-4-dev libgtk4-layer-shell-dev libdrm-dev libx11-dev \
+            libpipewire-0.3-dev libportal-dev
+
+      - name: Install Rust Stable Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Registry & Target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Native PipeWire Portal Helper
+        run: |
+          mkdir -p bin
+          gcc -O2 -Wall src/pw_portal_capture.c -o bin/hypergsr-pw-capture \
+            $(pkg-config --cflags --libs libportal libpipewire-0.3 gio-2.0) -lpthread
+
+      - name: Run Unit Tests
+        run: cargo test --verbose
+
+      - name: Build Release Binary
+        run: cargo build --release --verbose
