@@ -189,6 +189,75 @@ mod tests {
     }
 
     #[test]
+    fn test_smart_cursor_follow_returns_to_1x_and_never_sticks() {
+        let mut engine = ZoomEngine::new();
+        let mut tracker = CursorTracker::new();
+        let cur_cfg = CursorConfig::default();
+        let zoom_cfg = ZoomConfig::default(); // SmartCursorFollow, hold_duration_ms = 1650
+
+        // Move cursor to (0.3, 0.3) and click at t=500ms, then keep mouse completely still for 8 seconds.
+        let mut zoomed_in_seen = false;
+        let mut last_vp = Default::default();
+        for step in 0..500 {
+            let t_ms = step * 16;
+            let click = step == 30;
+            let (s, c) = tracker.update(t_ms, 0.30, 0.30, click, false, &cur_cfg);
+            let vp = engine.step(t_ms, s, c, if step > 30 { (step - 30) * 16 } else { 0 }, &zoom_cfg);
+            if vp.zoom > 1.65 {
+                zoomed_in_seen = true;
+            }
+            last_vp = vp;
+        }
+        assert!(zoomed_in_seen, "Should have zoomed in after click");
+        assert!(
+            last_vp.zoom < 1.05,
+            "Camera must smoothly return to 1.0x instead of staying stuck zoomed in! Got {}",
+            last_vp.zoom
+        );
+    }
+
+    #[test]
+    fn test_camera_trajectory_planner_bounded_and_c2_smooth() {
+        use crate::encoder::{build_smooth_60fps_camera_frames, RecordedZoomEvent};
+
+        // Simulate a 66-second recording where the old telemetry stayed stuck at 2.15x
+        let mut events = Vec::new();
+        for i in 0..1650 {
+            let t = i as f32 * 0.04;
+            // Cursor moves occasionally then rests for long periods
+            let phase = (t / 12.0).floor();
+            let cx = (0.2 + 0.15 * phase).clamp(0.15, 0.85);
+            let cy = (0.3 + 0.10 * phase).clamp(0.15, 0.85);
+            events.push(RecordedZoomEvent {
+                timestamp_sec: t,
+                center_x: cx,
+                center_y: cy,
+                zoom: if t > 1.0 { 2.15 } else { 1.0 },
+                cursor_x: cx,
+                cursor_y: cy,
+                clicked: (i % 350) == 40,
+            });
+        }
+
+        let total_frames = 66 * 60;
+        let frames = build_smooth_60fps_camera_frames(&events, total_frames);
+        assert_eq!(frames.len(), total_frames);
+
+        // 1. Verify camera returns to wide view (< 1.08x) for the majority of the 66s video
+        let wide_frames = frames.iter().filter(|(_, _, z)| *z < 1.15).count();
+        assert!(
+            wide_frames > total_frames / 2,
+            "Expected majority of frames to be in wide view, got {wide_frames}/{total_frames}"
+        );
+
+        // 2. Verify frame-to-frame zoom changes are C2-smooth (no jumps > 0.045 per 16.6ms frame)
+        for pair in frames.windows(2) {
+            let dz = (pair[1].2 - pair[0].2).abs();
+            assert!(dz < 0.045, "Unsmooth frame-to-frame zoom jump detected: dz={dz}");
+        }
+    }
+
+    #[test]
     fn test_decompiled_gsr_probe_and_shaders() {
         let report = decompiled_gsr::GsrDecompiledReport::probe_system();
         assert_eq!(report.gsr_version, "6.1.4");

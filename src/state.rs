@@ -176,17 +176,15 @@ impl StudioState {
 
         let rec_elapsed = self.recording_elapsed_sec();
         if let Some(ref mut session) = self.encoder_session {
-            let focus_x = if viewport.zoom > 1.05 {
-                viewport.center_x
-            } else {
-                sample.smooth_x
-            };
-            let focus_y = if viewport.zoom > 1.05 {
-                viewport.center_y
-            } else {
-                sample.smooth_y
-            };
-            session.record_zoom_telemetry(rec_elapsed, focus_x, focus_y, viewport.zoom);
+            session.record_zoom_telemetry(
+                rec_elapsed,
+                viewport.center_x,
+                viewport.center_y,
+                viewport.zoom,
+                sample.smooth_x,
+                sample.smooth_y,
+                clicked_now,
+            );
         }
     }
 

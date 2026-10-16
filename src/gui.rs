@@ -6,8 +6,7 @@ use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, DrawingArea,
-    EventControllerMotion, GestureClick, Image, Label, Orientation, Revealer,
-    RevealerTransitionType,
+    EventControllerMotion, GestureClick, Image, Label, Orientation,
 };
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CString};
@@ -99,7 +98,7 @@ fn init_wayland_layer_shell(window: &ApplicationWindow) -> bool {
         set_anchor(win_ptr, 1, 0);
         set_anchor(win_ptr, 2, 1); // TOP CENTER
         set_anchor(win_ptr, 3, 0);
-        set_margin(win_ptr, 2, 4);
+        set_margin(win_ptr, 2, 6);
         set_excl(win_ptr, -1);
         set_kb(win_ptr, 2); // ON_DEMAND
         true
@@ -124,238 +123,255 @@ fn load_dynamic_island_css() {
             font-family: "Inter", "SF Pro Display", system-ui, sans-serif;
         }
 
-        /* =========================================================
-           OBSIDIAN DARK MODE (Default Apple Dynamic Island)
-           ========================================================= */
+        /* =================================================================
+           OBSIDIAN DARK MODE (Default — Screen Studio / Apple Dynamic Island)
+           ================================================================= */
         .island-shell {
-            background-color: rgba(5, 5, 8, 0.97);
+            background-color: rgba(8, 8, 12, 0.98);
             border: 1px solid rgba(255, 255, 255, 0.14);
             border-radius: 22px;
-            padding: 5px 10px;
-            margin: 1px;
+            padding: 5px 8px;
+            margin: 0px;
         }
         .island-shell-rec {
-            background-color: rgba(12, 4, 7, 0.98);
-            border: 1.5px solid rgba(244, 63, 94, 0.72);
+            background-color: rgba(12, 6, 9, 0.98);
+            border: 1px solid rgba(244, 63, 94, 0.55);
             border-radius: 22px;
-            padding: 5px 10px;
-            margin: 1px;
+            padding: 5px 8px;
+            margin: 0px;
         }
+
         .island-top-row {
-            min-height: 28px;
+            padding: 0px;
+            margin: 0px;
         }
+
         .brand-pill {
-            background-color: rgba(255, 255, 255, 0.05);
+            background-color: rgba(255, 255, 255, 0.055);
+            border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 999px;
-            padding: 2px 9px 2px 6px;
+            padding: 4px 10px 4px 8px;
         }
+
         .island-title {
-            color: #fafafa;
             font-size: 11.5px;
-            font-weight: 700;
-            letter-spacing: -0.01em;
+            font-weight: 800;
+            color: #f8fafc;
+            letter-spacing: -0.2px;
         }
         .island-timer-rec {
-            color: #fda4af;
             font-family: "JetBrains Mono", monospace;
             font-size: 11.5px;
-            font-weight: 700;
+            font-weight: 800;
+            color: #fb7185;
         }
+
         button {
             background-image: none;
             box-shadow: none;
             outline: none;
-            border: none;
             border-radius: 999px;
-            padding: 3px 10px;
-            font-size: 11px;
-            font-weight: 600;
+            padding: 4px 10px;
             min-height: 24px;
-            background-color: rgba(255, 255, 255, 0.07);
-            color: #d4d4d8;
+            min-width: 0px;
+            font-size: 11px;
+            font-weight: 700;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background-color: rgba(255, 255, 255, 0.06);
+            color: #e4e4e7;
         }
         button:hover {
-            background-color: rgba(255, 255, 255, 0.14);
+            background-color: rgba(255, 255, 255, 0.12);
+            border-color: rgba(255, 255, 255, 0.18);
             color: #ffffff;
         }
-        .lens-pill {
-            background-color: rgba(99, 102, 241, 0.15);
+
+        button.lens-pill {
+            background-color: rgba(99, 102, 241, 0.14);
+            border: 1px solid rgba(129, 140, 248, 0.30);
             color: #c7d2fe;
-            border-radius: 999px;
-            padding: 3px 10px;
             font-family: "JetBrains Mono", monospace;
             font-size: 10.5px;
             font-weight: 700;
+            padding: 4px 10px;
         }
-        .lens-pill:hover {
-            background-color: rgba(99, 102, 241, 0.26);
-        }
-        .lens-pill-zoomed {
-            background-color: rgba(16, 185, 129, 0.19);
+        button.lens-pill-zoomed {
+            background-color: rgba(16, 185, 129, 0.18);
+            border: 1px solid rgba(52, 211, 153, 0.48);
             color: #6ee7b7;
-            border-radius: 999px;
-            padding: 3px 10px;
             font-family: "JetBrains Mono", monospace;
             font-size: 10.5px;
-            font-weight: 700;
+            font-weight: 800;
+            padding: 4px 10px;
         }
-        .shutter-rec {
+
+        button.shutter-rec {
             background-color: #e11d48;
+            border: 1px solid rgba(251, 113, 133, 0.55);
             color: #ffffff;
-            border-radius: 999px;
-            padding: 3px 12px;
-            font-size: 11px;
-            font-weight: 700;
+            font-weight: 800;
+            padding: 4px 12px;
         }
-        .shutter-rec:hover {
+        button.shutter-rec:hover {
             background-color: #f43f5e;
-            color: #ffffff;
         }
-        .shutter-stop {
-            background-color: rgba(244, 63, 94, 0.22);
+
+        button.shutter-stop {
+            background-color: rgba(225, 29, 72, 0.24);
+            border: 1px solid #fb7185;
             color: #fecdd3;
-            border: 1px solid rgba(244, 63, 94, 0.55);
-            border-radius: 999px;
-            padding: 3px 12px;
-            font-size: 11px;
-            font-weight: 700;
+            font-weight: 800;
+            padding: 4px 12px;
         }
-        .theme-pill {
-            background-color: rgba(255, 255, 255, 0.065);
-            border-radius: 999px;
-            padding: 3px 8px;
-            min-width: 24px;
+
+        button.theme-pill {
+            background-color: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            padding: 4px 8px;
         }
-        .studio-pill {
-            background-color: rgba(255, 255, 255, 0.07);
-            color: #e4e4e7;
-            border-radius: 999px;
-            padding: 3px 10px;
-            font-size: 11px;
-            font-weight: 600;
+
+        button.studio-pill {
+            background-color: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            color: #d4d4d8;
+            padding: 4px 10px;
         }
-        .studio-pill-open {
+        button.studio-pill-open {
             background-color: rgba(99, 102, 241, 0.24);
+            border: 1px solid rgba(129, 140, 248, 0.45);
             color: #e0e7ff;
-            border-radius: 999px;
-            padding: 3px 10px;
-            font-size: 11px;
-            font-weight: 600;
+            padding: 4px 10px;
         }
-        .close-pill {
+
+        button.close-pill {
             background-color: transparent;
+            border: 1px solid transparent;
             color: #71717a;
-            border-radius: 999px;
-            padding: 2px 7px;
-            min-width: 22px;
+            padding: 4px 7px;
+            font-size: 11px;
         }
-        .close-pill:hover {
-            background-color: rgba(244, 63, 94, 0.2);
+        button.close-pill:hover {
+            background-color: rgba(244, 63, 94, 0.18);
             color: #fda4af;
         }
+
+        /* Compact Vertical Studio Drawer (matches top bar width — zero dead space) */
         .island-drawer {
             border-top: 1px solid rgba(255, 255, 255, 0.08);
-            margin-top: 7px;
-            padding: 9px 4px 3px 4px;
+            margin-top: 6px;
+            padding: 8px 2px 2px 2px;
         }
+
         .bento-card {
-            background-color: rgba(17, 17, 23, 0.92);
+            background-color: rgba(17, 17, 24, 0.96);
             border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 16px;
-            padding: 10px;
+            border-radius: 14px;
+            padding: 9px 10px;
         }
+
         .section-cap {
-            color: #71717a;
+            font-size: 9.5px;
+            font-weight: 800;
+            letter-spacing: 0.7px;
+            color: #94a3b8;
+        }
+
+        .coord-badge {
+            font-family: "JetBrains Mono", monospace;
             font-size: 9.5px;
             font-weight: 700;
-            letter-spacing: 0.08em;
+            color: #34d399;
         }
+
         .seg-track {
-            background-color: rgba(6, 6, 10, 0.85);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 11px;
+            background-color: rgba(5, 5, 8, 0.90);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-radius: 10px;
             padding: 2px;
         }
-        .seg-btn {
+        button.seg-btn {
             background-color: transparent;
-            color: #a1a1aa;
-            border-radius: 9px;
-            padding: 4px 8px;
-            font-size: 10.5px;
-            font-weight: 600;
-            min-height: 22px;
-        }
-        .seg-btn:hover {
-            background-color: rgba(255, 255, 255, 0.06);
-            color: #f4f4f5;
-        }
-        .seg-btn-active {
-            background-color: #4f46e5;
-            color: #ffffff;
-            border-radius: 9px;
-            padding: 4px 8px;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            color: #94a3b8;
             font-size: 10.5px;
             font-weight: 700;
-            min-height: 22px;
+            padding: 3px 7px;
+            min-height: 20px;
         }
-        .seg-btn-active:hover {
-            background-color: #6366f1;
-            color: #ffffff;
-        }
-        .toggle-chip {
+        button.seg-btn:hover {
+            color: #f1f5f9;
             background-color: rgba(255, 255, 255, 0.04);
-            border: 1px solid rgba(255, 255, 255, 0.07);
-            color: #71717a;
-            border-radius: 11px;
-            padding: 5px 9px;
-            font-size: 10.5px;
-            font-weight: 600;
         }
-        .toggle-chip-on {
-            background-color: rgba(16, 185, 129, 0.13);
-            border: 1px solid rgba(16, 185, 129, 0.35);
-            color: #a7f3d0;
-            border-radius: 11px;
-            padding: 5px 9px;
+        button.seg-btn-active {
+            background-color: #4f46e5;
+            border: 1px solid rgba(165, 180, 252, 0.40);
+            border-radius: 8px;
+            color: #ffffff;
+            font-size: 10.5px;
+            font-weight: 800;
+            padding: 3px 7px;
+            min-height: 20px;
+        }
+
+        button.toggle-chip {
+            background-color: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 9px;
+            color: #94a3b8;
             font-size: 10.5px;
             font-weight: 700;
+            padding: 4px 8px;
         }
-        .action-chip {
-            background-color: rgba(99, 102, 241, 0.16);
-            color: #c7d2fe;
-            border-radius: 10px;
-            padding: 4px 10px;
+        button.toggle-chip-on {
+            background-color: rgba(16, 185, 129, 0.14);
+            border: 1px solid rgba(52, 211, 153, 0.36);
+            border-radius: 9px;
+            color: #6ee7b7;
             font-size: 10.5px;
-            font-weight: 600;
+            font-weight: 800;
+            padding: 4px 8px;
         }
-        .action-chip:hover {
+
+        button.action-chip {
+            background-color: rgba(99, 102, 241, 0.16);
+            border: 1px solid rgba(129, 140, 248, 0.32);
+            border-radius: 9px;
+            color: #c7d2fe;
+            font-size: 10.5px;
+            font-weight: 700;
+            padding: 4px 10px;
+        }
+        button.action-chip:hover {
             background-color: rgba(99, 102, 241, 0.28);
             color: #ffffff;
         }
+
         .status-strip {
             border-top: 1px solid rgba(255, 255, 255, 0.07);
-            margin-top: 4px;
             padding-top: 6px;
+            margin-top: 2px;
             font-family: "JetBrains Mono", monospace;
-            font-size: 10px;
-            color: #a1a1aa;
+            font-size: 9.5px;
+            color: #94a3b8;
         }
 
-        /* =========================================================
-           PEARL FROSTED LIGHT MODE (.theme-light)
-           ========================================================= */
+        /* =================================================================
+           PEARL FROSTED LIGHT MODE (`.theme-light`)
+           ================================================================= */
         .theme-light.island-shell {
-            background-color: rgba(248, 250, 252, 0.97);
-            border: 1px solid rgba(15, 23, 42, 0.15);
+            background-color: rgba(248, 250, 252, 0.98);
+            border: 1px solid rgba(15, 23, 42, 0.14);
             color: #0f172a;
         }
         .theme-light.island-shell-rec {
-            background-color: rgba(255, 245, 247, 0.98);
-            border: 1.5px solid #e11d48;
+            background-color: rgba(255, 241, 242, 0.98);
+            border: 1px solid rgba(225, 29, 72, 0.45);
             color: #0f172a;
         }
         .theme-light .brand-pill {
-            background-color: rgba(15, 23, 42, 0.06);
+            background-color: rgba(15, 23, 42, 0.05);
+            border: 1px solid rgba(15, 23, 42, 0.09);
         }
         .theme-light .island-title {
             color: #0f172a;
@@ -364,79 +380,80 @@ fn load_dynamic_island_css() {
             color: #e11d48;
         }
         .theme-light button {
-            background-color: rgba(15, 23, 42, 0.06);
-            color: #334155;
-        }
-        .theme-light button:hover {
-            background-color: rgba(15, 23, 42, 0.12);
-            color: #0f172a;
-        }
-        .theme-light .lens-pill {
-            background-color: rgba(79, 70, 229, 0.12);
-            color: #4338ca;
-        }
-        .theme-light .lens-pill-zoomed {
-            background-color: rgba(5, 150, 105, 0.15);
-            color: #047857;
-        }
-        .theme-light .shutter-rec {
-            background-color: #e11d48;
-            color: #ffffff;
-        }
-        .theme-light .shutter-rec:hover {
-            background-color: #be123c;
-            color: #ffffff;
-        }
-        .theme-light .studio-pill {
-            background-color: rgba(15, 23, 42, 0.07);
+            background-color: rgba(15, 23, 42, 0.05);
+            border: 1px solid rgba(15, 23, 42, 0.10);
             color: #1e293b;
         }
-        .theme-light .studio-pill-open {
-            background-color: rgba(79, 70, 229, 0.16);
+        .theme-light button:hover {
+            background-color: rgba(15, 23, 42, 0.10);
+            color: #0f172a;
+        }
+        .theme-light button.lens-pill {
+            background-color: rgba(79, 70, 229, 0.10);
+            border: 1px solid rgba(79, 70, 229, 0.25);
+            color: #4338ca;
+        }
+        .theme-light button.lens-pill-zoomed {
+            background-color: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(5, 150, 105, 0.40);
+            color: #065f46;
+        }
+        .theme-light button.shutter-rec {
+            background-color: #e11d48;
+            border: 1px solid #be123c;
+            color: #ffffff;
+        }
+        .theme-light button.shutter-stop {
+            background-color: rgba(225, 29, 72, 0.15);
+            border: 1px solid #e11d48;
+            color: #be123c;
+        }
+        .theme-light button.studio-pill-open {
+            background-color: rgba(79, 70, 229, 0.14);
+            border: 1px solid rgba(79, 70, 229, 0.35);
             color: #3730a3;
         }
         .theme-light .island-drawer {
-            border-top: 1px solid rgba(15, 23, 42, 0.09);
+            border-top: 1px solid rgba(15, 23, 42, 0.08);
         }
         .theme-light .bento-card {
-            background-color: rgba(255, 255, 255, 0.94);
+            background-color: #ffffff;
             border: 1px solid rgba(15, 23, 42, 0.09);
         }
         .theme-light .section-cap {
             color: #64748b;
         }
+        .theme-light .coord-badge {
+            color: #059669;
+        }
         .theme-light .seg-track {
             background-color: #e2e8f0;
-            border: 1px solid rgba(15, 23, 42, 0.06);
+            border: 1px solid rgba(15, 23, 42, 0.08);
         }
-        .theme-light .seg-btn {
-            background-color: transparent;
+        .theme-light button.seg-btn {
             color: #475569;
         }
-        .theme-light .seg-btn:hover {
-            background-color: rgba(255, 255, 255, 0.6);
-            color: #0f172a;
-        }
-        .theme-light .seg-btn-active {
+        .theme-light button.seg-btn-active {
             background-color: #4f46e5;
             color: #ffffff;
         }
-        .theme-light .toggle-chip {
+        .theme-light button.toggle-chip {
             background-color: #f1f5f9;
             border: 1px solid #cbd5e1;
             color: #64748b;
         }
-        .theme-light .toggle-chip-on {
+        .theme-light button.toggle-chip-on {
             background-color: rgba(16, 185, 129, 0.14);
-            border: 1px solid rgba(5, 150, 105, 0.4);
+            border: 1px solid rgba(5, 150, 105, 0.38);
             color: #065f46;
         }
-        .theme-light .action-chip {
+        .theme-light button.action-chip {
             background-color: rgba(79, 70, 229, 0.12);
+            border: 1px solid rgba(79, 70, 229, 0.28);
             color: #4338ca;
         }
         .theme-light .status-strip {
-            border-top: 1px solid rgba(15, 23, 42, 0.09);
+            border-top: 1px solid rgba(15, 23, 42, 0.08);
             color: #475569;
         }
         "#,
@@ -500,28 +517,29 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
     let shell_box = GtkBox::new(Orientation::Vertical, 0);
     shell_box.add_css_class("island-shell");
+    shell_box.set_halign(Align::Center);
     if is_light_mode.load(Ordering::Relaxed) {
         shell_box.add_css_class("theme-light");
     }
 
     // =========================================================================
-    // COMPACT DYNAMIC ISLAND CAPSULE (Tight, zero dead space, Dark & Light modes)
+    // COMPACT DYNAMIC ISLAND BAR (Tight ~360px Pill — Zero Empty Dead Space)
     // =========================================================================
-    let top_row = GtkBox::new(Orientation::Horizontal, 6);
+    let top_row = GtkBox::new(Orientation::Horizontal, 5);
     top_row.add_css_class("island-top-row");
     top_row.set_valign(Align::Center);
 
-    // Left Brand & Live Waveform Pill
-    let brand_box = GtkBox::new(Orientation::Horizontal, 6);
+    // 1. Left Brand & Waveform Pill
+    let brand_box = GtkBox::new(Orientation::Horizontal, 5);
     brand_box.add_css_class("brand-pill");
     brand_box.set_valign(Align::Center);
 
     let logo_img = Image::from_file(asset_path("hypergsr-logo.svg"));
-    logo_img.set_pixel_size(18);
+    logo_img.set_pixel_size(16);
 
     let wave_indicator = DrawingArea::new();
-    wave_indicator.set_content_width(26);
-    wave_indicator.set_content_height(14);
+    wave_indicator.set_content_width(22);
+    wave_indicator.set_content_height(13);
     {
         let st = state.clone();
         wave_indicator.set_draw_func(move |_, cr, _w, h| {
@@ -532,14 +550,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             drop(g);
 
             for i in 0..4 {
-                let x = 2.0 + i as f64 * 6.0;
+                let x = 1.5 + i as f64 * 5.0;
                 let phase = t * 7.5 + i as f64 * 1.15;
                 let amp = if is_rec {
                     0.35 + 0.65 * phase.sin().abs()
                 } else if zoom > 1.06 {
                     0.30 + 0.60 * (phase * 1.2).cos().abs()
                 } else {
-                    0.28
+                    0.30
                 };
                 let bar_h = (h as f64 * amp).clamp(3.0, h as f64 - 2.0);
                 let y = (h as f64 - bar_h) * 0.5;
@@ -551,7 +569,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 } else {
                     cr.set_source_rgb(0.38, 0.40, 0.94);
                 }
-                draw_rounded_rect(cr, x, y, 3.0, bar_h, 1.5);
+                draw_rounded_rect(cr, x, y, 2.8, bar_h, 1.4);
                 cr.fill().ok();
             }
         });
@@ -564,45 +582,49 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     brand_box.append(&wave_indicator);
     brand_box.append(&status_lbl);
 
-    // Center Live Auto-Zoom Lens Badge
+    // 2. Fixed-Width Live Auto-Zoom Pill (No variable-length pixel coords in top bar!)
     let zoom_pill_btn = Button::new();
     zoom_pill_btn.add_css_class("lens-pill");
     zoom_pill_btn.set_tooltip_text(Some(
-        "Live Auto-Zoom Lens — Tracks your cursor automatically (Click to pulse 2.15× zoom)",
+        "Screen Studio Auto-Zoom Lens (Click to pulse a 2.0× smooth zoom)",
     ));
-    let zoom_pill_box = GtkBox::new(Orientation::Horizontal, 5);
+    let zoom_pill_box = GtkBox::new(Orientation::Horizontal, 4);
     let zoom_icon = Image::from_file(asset_path("icon-autozoom.svg"));
-    zoom_icon.set_pixel_size(13);
-    let zoom_pill_lbl = Label::new(Some("2.15× FOLLOW"));
+    zoom_icon.set_pixel_size(12);
+    let zoom_pill_lbl = Label::new(Some("2.0× Auto"));
     zoom_pill_box.append(&zoom_icon);
     zoom_pill_box.append(&zoom_pill_lbl);
     zoom_pill_btn.set_child(Some(&zoom_pill_box));
 
-    // Right Shutter Record Button
+    // Flexible spacer so when expanded, left and right controls stay flush with the edges
+    let top_spacer = GtkBox::new(Orientation::Horizontal, 0);
+    top_spacer.set_hexpand(true);
+
+    // 3. Shutter Record / Stop Button
     let rec_btn = Button::new();
     rec_btn.add_css_class("shutter-rec");
     rec_btn.set_tooltip_text(Some("Start / Stop 60 FPS Zero-Copy GPU Recording"));
     let rec_btn_box = GtkBox::new(Orientation::Horizontal, 5);
     let rec_icon = Image::from_file(asset_path("icon-record.svg"));
-    rec_icon.set_pixel_size(13);
+    rec_icon.set_pixel_size(12);
     let rec_btn_lbl = Label::new(Some("Record"));
     rec_btn_box.append(&rec_icon);
     rec_btn_box.append(&rec_btn_lbl);
     rec_btn.set_child(Some(&rec_btn_box));
 
-    // Quick Dark / Light Theme Pill Button right on the Dynamic Island
+    // 4. Quick Dark / Light Theme Pill
     let theme_btn = Button::new();
     theme_btn.add_css_class("theme-pill");
-    theme_btn.set_tooltip_text(Some("Switch between Obsidian Dark Mode & Pearl Light Mode"));
+    theme_btn.set_tooltip_text(Some("Switch between Obsidian Dark & Pearl Light"));
     let theme_icon = Image::from_file(if is_light_mode.load(Ordering::Relaxed) {
         asset_path("icon-sun.svg")
     } else {
         asset_path("icon-theme.svg")
     });
-    theme_icon.set_pixel_size(14);
+    theme_icon.set_pixel_size(13);
     theme_btn.set_child(Some(&theme_icon));
 
-    // Studio Drawer Toggle Pill
+    // 5. Compact Studio Drawer Toggle Pill
     let expand_btn = Button::with_label(if start_expanded {
         "Studio ▴"
     } else {
@@ -614,12 +636,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         "studio-pill"
     });
 
+    // 6. Quit Button
     let close_btn = Button::with_label("✕");
     close_btn.add_css_class("close-pill");
     close_btn.set_tooltip_text(Some("Quit HyperGSR"));
 
     top_row.append(&brand_box);
     top_row.append(&zoom_pill_btn);
+    top_row.append(&top_spacer);
     top_row.append(&rec_btn);
     top_row.append(&theme_btn);
     top_row.append(&expand_btn);
@@ -628,40 +652,42 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     shell_box.append(&top_row);
 
     // =========================================================================
-    // EXPANDED DYNAMIC ISLAND STUDIO (Custom Bento Cards & Segmented Pills)
+    // COMPACT VERTICAL STUDIO POPOVER (Exact same ~372px width as Top Bar!)
+    // Uses `set_visible(false)` when collapsed so GTK4 shrinks width to the pill!
     // =========================================================================
-    let revealer = Revealer::new();
-    revealer.set_transition_type(RevealerTransitionType::SlideDown);
-    revealer.set_transition_duration(160);
-    revealer.set_reveal_child(start_expanded);
-
-    let drawer_box = GtkBox::new(Orientation::Vertical, 8);
+    let drawer_box = GtkBox::new(Orientation::Vertical, 7);
     drawer_box.add_css_class("island-drawer");
-
-    let bento_cols = GtkBox::new(Orientation::Horizontal, 10);
+    drawer_box.set_size_request(368, -1);
+    drawer_box.set_visible(start_expanded);
 
     // -------------------------------------------------------------------------
-    // LEFT BENTO CARD: Live Hardware Cursor + Auto-Zoom Camera Viewfinder
+    // CARD 1: Live 16:9 Cursor Camera Viewfinder & Spring Curve
     // -------------------------------------------------------------------------
-    let vis_card = GtkBox::new(Orientation::Vertical, 7);
+    let vis_card = GtkBox::new(Orientation::Vertical, 6);
     vis_card.add_css_class("bento-card");
-    vis_card.set_size_request(292, -1);
 
     let vis_hdr = GtkBox::new(Orientation::Horizontal, 6);
     let gpu_icon = Image::from_file(asset_path("icon-gpu.svg"));
-    gpu_icon.set_pixel_size(13);
-    let vis_title = Label::new(Some("LIVE CURSOR CAMERA & SPRING TELEMETRY"));
+    gpu_icon.set_pixel_size(12);
+    let vis_title = Label::new(Some("LIVE CURSOR CAMERA"));
     vis_title.add_css_class("section-cap");
+    vis_title.set_hexpand(true);
+    vis_title.set_halign(Align::Start);
+
+    let coord_lbl = Label::new(Some("DRM #92 · (960, 540)"));
+    coord_lbl.add_css_class("coord-badge");
+
     vis_hdr.append(&gpu_icon);
     vis_hdr.append(&vis_title);
+    vis_hdr.append(&coord_lbl);
     vis_card.append(&vis_hdr);
 
     let radar_area = DrawingArea::new();
-    radar_area.set_content_width(272);
-    radar_area.set_content_height(156);
+    radar_area.set_content_width(346);
+    radar_area.set_content_height(126);
 
     let zoom_history: std::rc::Rc<std::cell::RefCell<VecDeque<f32>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(VecDeque::from(vec![1.0; 64])));
+        std::rc::Rc::new(std::cell::RefCell::new(VecDeque::from(vec![1.0; 72])));
 
     let motion_ctrl = EventControllerMotion::new();
     {
@@ -701,7 +727,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let Some(g) = st.try_lock() else { return };
             let w = width as f64;
             let h = height as f64;
-            let screen_h = h - 34.0;
+            let screen_h = h - 28.0;
             let light = light_flag.load(Ordering::Relaxed);
 
             let vp = g.last_viewport;
@@ -710,8 +736,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let ripples: Vec<_> = g.cursor_tracker.active_ripples().to_vec();
             drop(g);
 
-            // 1. Rounded 16:9 Screen Canvas (adapts to Dark & Light theme)
-            draw_rounded_rect(cr, 0.0, 0.0, w, screen_h, 10.0);
+            // 1. Rounded 16:9 Screen Canvas
+            draw_rounded_rect(cr, 0.0, 0.0, w, screen_h, 9.0);
             if light {
                 cr.set_source_rgb(0.94, 0.96, 0.985);
             } else {
@@ -719,31 +745,31 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             }
             cr.fill().ok();
 
-            // Simulated desktop window silhouettes for spatial reference
+            // Window silhouettes
             if light {
                 cr.set_source_rgba(0.06, 0.09, 0.16, 0.06);
             } else {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.035);
             }
-            draw_rounded_rect(cr, w * 0.08, screen_h * 0.14, w * 0.46, screen_h * 0.65, 5.0);
+            draw_rounded_rect(cr, w * 0.07, screen_h * 0.14, w * 0.46, screen_h * 0.68, 4.0);
             cr.fill().ok();
-            draw_rounded_rect(cr, w * 0.58, screen_h * 0.20, w * 0.34, screen_h * 0.58, 5.0);
+            draw_rounded_rect(cr, w * 0.57, screen_h * 0.18, w * 0.36, screen_h * 0.60, 4.0);
             cr.fill().ok();
 
-            // Subtle rule-of-thirds grid
+            // Rule-of-thirds grid
             if light {
-                cr.set_source_rgba(0.06, 0.09, 0.16, 0.07);
+                cr.set_source_rgba(0.06, 0.09, 0.16, 0.06);
             } else {
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.045);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.04);
             }
             cr.set_line_width(1.0);
             for i in 1..=2 {
                 let gx = w * (i as f64 / 3.0);
                 let gy = screen_h * (i as f64 / 3.0);
-                cr.move_to(gx, 4.0);
-                cr.line_to(gx, screen_h - 4.0);
-                cr.move_to(4.0, gy);
-                cr.line_to(w - 4.0, gy);
+                cr.move_to(gx, 3.0);
+                cr.line_to(gx, screen_h - 3.0);
+                cr.move_to(3.0, gy);
+                cr.line_to(w - 3.0, gy);
             }
             cr.stroke().ok();
 
@@ -755,37 +781,37 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
             if vp.zoom > 1.06 {
                 cr.set_source_rgba(0.06, 0.72, 0.50, if light { 0.16 } else { 0.14 });
-                draw_rounded_rect(cr, vx, vy, vw, vh, 6.0);
+                draw_rounded_rect(cr, vx, vy, vw, vh, 5.0);
                 cr.fill().ok();
 
                 cr.set_source_rgba(0.06, 0.76, 0.54, 0.95);
-                cr.set_line_width(1.8);
-                draw_rounded_rect(cr, vx, vy, vw, vh, 6.0);
+                cr.set_line_width(1.6);
+                draw_rounded_rect(cr, vx, vy, vw, vh, 5.0);
                 cr.stroke().ok();
             } else {
                 cr.set_source_rgba(0.38, 0.40, 0.95, 0.45);
-                cr.set_line_width(1.2);
-                draw_rounded_rect(cr, vx + 1.0, vy + 1.0, vw - 2.0, vh - 2.0, 8.0);
+                cr.set_line_width(1.1);
+                draw_rounded_rect(cr, vx + 1.0, vy + 1.0, vw - 2.0, vh - 2.0, 7.0);
                 cr.stroke().ok();
             }
 
-            // 3. Click / Interaction Ripples
+            // 3. Click Ripples
             for ripple in &ripples {
                 let p = ((now_ms.saturating_sub(ripple.start_ms)) as f64 / 650.0).clamp(0.0, 1.0);
                 let rx = ripple.x as f64 * w;
                 let ry = ripple.y as f64 * screen_h;
                 cr.set_source_rgba(0.06, 0.76, 0.54, (1.0 - p) * 0.9);
-                cr.set_line_width(2.0);
-                cr.arc(rx, ry, 4.0 + p * 20.0, 0.0, std::f64::consts::TAU);
+                cr.set_line_width(1.8);
+                cr.arc(rx, ry, 3.0 + p * 16.0, 0.0, std::f64::consts::TAU);
                 cr.stroke().ok();
             }
 
             // 4. Live Hardware Cursor Dot & Focus Halo
-            let cx = (cur.smooth_x as f64 * w).clamp(5.0, w - 5.0);
-            let cy = (cur.smooth_y as f64 * screen_h).clamp(5.0, screen_h - 5.0);
+            let cx = (cur.smooth_x as f64 * w).clamp(4.0, w - 4.0);
+            let cy = (cur.smooth_y as f64 * screen_h).clamp(4.0, screen_h - 4.0);
 
             cr.set_source_rgba(0.06, 0.76, 0.54, 0.30);
-            cr.arc(cx, cy, 9.0, 0.0, std::f64::consts::TAU);
+            cr.arc(cx, cy, 8.0, 0.0, std::f64::consts::TAU);
             cr.fill().ok();
 
             if light {
@@ -793,13 +819,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             } else {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.98);
             }
-            cr.arc(cx, cy, 3.8, 0.0, std::f64::consts::TAU);
+            cr.arc(cx, cy, 3.4, 0.0, std::f64::consts::TAU);
             cr.fill().ok();
 
             // 5. Bottom Spring Zoom Curve Strip
-            let strip_y = screen_h + 5.0;
+            let strip_y = screen_h + 4.0;
             let strip_h = h - strip_y;
-            draw_rounded_rect(cr, 0.0, strip_y, w, strip_h, 7.0);
+            draw_rounded_rect(cr, 0.0, strip_y, w, strip_h, 6.0);
             if light {
                 cr.set_source_rgb(0.91, 0.94, 0.97);
             } else {
@@ -810,11 +836,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let hist = z_hist.borrow();
             if hist.len() >= 2 {
                 cr.set_source_rgba(0.31, 0.27, 0.90, 0.95);
-                cr.set_line_width(1.8);
+                cr.set_line_width(1.6);
                 for (idx, &z_val) in hist.iter().enumerate() {
                     let px = (idx as f64 / (hist.len() - 1).max(1) as f64) * (w - 8.0) + 4.0;
-                    let norm_z = ((z_val as f64 - 1.0) / 1.85).clamp(0.0, 1.0);
-                    let py = strip_y + strip_h - 4.0 - norm_z * (strip_h - 8.0);
+                    let norm_z = ((z_val as f64 - 1.0) / 1.65).clamp(0.0, 1.0);
+                    let py = strip_y + strip_h - 3.5 - norm_z * (strip_h - 7.0);
                     if idx == 0 {
                         cr.move_to(px, py);
                     } else {
@@ -828,7 +854,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     vis_card.append(&radar_area);
 
     let vis_btn_row = GtkBox::new(Orientation::Horizontal, 6);
-    let test_zoom_btn = Button::with_label("⚡ Pulse 2.15× Zoom");
+    let test_zoom_btn = Button::with_label("⚡ Pulse 2.0× Zoom");
     test_zoom_btn.add_css_class("action-chip");
     test_zoom_btn.set_hexpand(true);
     let reset_zoom_btn = Button::with_label("1.0× Wide");
@@ -843,7 +869,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let cur_cfg = g.cursor_cfg.clone();
             g.cursor_tracker.update(now, cx, cy, true, false, &cur_cfg);
             g.zoom_engine
-                .trigger_manual_zoom(cx, cy, target_z, now, 2600);
+                .trigger_manual_zoom(cx, cy, target_z, now, 1650);
         });
     }
     {
@@ -857,7 +883,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let cur_cfg = g.cursor_cfg.clone();
             g.cursor_tracker.update(now, cx, cy, true, false, &cur_cfg);
             g.zoom_engine
-                .trigger_manual_zoom(cx, cy, target_z, now, 2600);
+                .trigger_manual_zoom(cx, cy, target_z, now, 1650);
         });
     }
     {
@@ -865,24 +891,23 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         reset_zoom_btn.connect_clicked(move |_| {
             let mut g = st.lock();
             let now = g.now_ms();
-            g.zoom_engine.trigger_manual_zoom(0.5, 0.5, 1.0, now, 400);
+            g.zoom_engine.trigger_manual_zoom(0.5, 0.5, 1.0, now, 300);
         });
     }
     vis_btn_row.append(&test_zoom_btn);
     vis_btn_row.append(&reset_zoom_btn);
     vis_card.append(&vis_btn_row);
 
-    bento_cols.append(&vis_card);
+    drawer_box.append(&vis_card);
 
     // -------------------------------------------------------------------------
-    // RIGHT BENTO CARD: Custom Segmented Pill Controls + Appearance Mode
+    // CARD 2: Compact Segmented Controls (Theme, Camera Mode, Depth, Spring)
     // -------------------------------------------------------------------------
-    let ctrl_card = GtkBox::new(Orientation::Vertical, 7);
+    let ctrl_card = GtkBox::new(Orientation::Vertical, 6);
     ctrl_card.add_css_class("bento-card");
-    ctrl_card.set_hexpand(true);
 
-    // 0. Appearance Mode Segmented Switcher (Obsidian Dark vs Pearl Light)
-    let app_cap = Label::new(Some("APPEARANCE THEME"));
+    // Theme + Camera Mode in tight segmented tracks
+    let app_cap = Label::new(Some("THEME & CAMERA MODE"));
     app_cap.add_css_class("section-cap");
     app_cap.set_halign(Align::Start);
     ctrl_card.append(&app_cap);
@@ -902,11 +927,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             0
         },
     );
-
-    // 1. Segmented Control: Auto-Zoom Camera Behavior
-    let mode_cap = Label::new(Some("AUTO-ZOOM CAMERA MODE"));
-    mode_cap.add_css_class("section-cap");
-    mode_cap.set_halign(Align::Start);
+    app_track.append(&t_dark);
+    app_track.append(&t_light);
+    ctrl_card.append(&app_track);
 
     let mode_track = GtkBox::new(Orientation::Horizontal, 3);
     mode_track.add_css_class("seg-track");
@@ -945,6 +968,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     mode_track.append(&m_follow);
     mode_track.append(&m_click);
     mode_track.append(&m_tour);
+    ctrl_card.append(&mode_track);
 
     // Wire Dark / Light Theme toggle across top button + segmented switcher
     {
@@ -996,14 +1020,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             r_area.queue_draw();
         });
     }
-    app_track.append(&t_dark);
-    app_track.append(&t_light);
-    ctrl_card.append(&app_track);
-    ctrl_card.append(&mode_cap);
-    ctrl_card.append(&mode_track);
 
-    // 2. Segmented Control: Magnification Depth
-    let mag_cap = Label::new(Some("ZOOM DEPTH"));
+    // Zoom Depth & Spring Response
+    let mag_cap = Label::new(Some("ZOOM DEPTH & SPRING RESPONSE"));
     mag_cap.add_css_class("section-cap");
     mag_cap.set_halign(Align::Start);
     ctrl_card.append(&mag_cap);
@@ -1011,19 +1030,19 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     let mag_track = GtkBox::new(Orientation::Horizontal, 3);
     mag_track.add_css_class("seg-track");
     let z_15 = Button::with_label("1.5×");
-    let z_21 = Button::with_label("2.15× Studio");
-    let z_26 = Button::with_label("2.6×");
-    let z_30 = Button::with_label("3.0× Deep");
-    for b in [&z_15, &z_21, &z_26, &z_30] {
+    let z_20 = Button::with_label("2.0× Studio");
+    let z_24 = Button::with_label("2.4×");
+    let z_28 = Button::with_label("2.8× Deep");
+    for b in [&z_15, &z_20, &z_24, &z_28] {
         b.set_hexpand(true);
     }
-    let mag_btns = vec![z_15.clone(), z_21.clone(), z_26.clone(), z_30.clone()];
+    let mag_btns = vec![z_15.clone(), z_20.clone(), z_24.clone(), z_28.clone()];
     set_active_segment(&mag_btns, 1);
     for (idx, (btn, val)) in [
         (z_15.clone(), 1.50f32),
-        (z_21.clone(), 2.15f32),
-        (z_26.clone(), 2.60f32),
-        (z_30.clone(), 3.00f32),
+        (z_20.clone(), 2.00f32),
+        (z_24.clone(), 2.40f32),
+        (z_28.clone(), 2.80f32),
     ]
     .into_iter()
     .enumerate()
@@ -1036,37 +1055,31 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let now = g.now_ms();
             let cx = g.last_cursor.smooth_x;
             let cy = g.last_cursor.smooth_y;
-            g.zoom_engine.trigger_manual_zoom(cx, cy, val, now, 2000);
+            g.zoom_engine.trigger_manual_zoom(cx, cy, val, now, 1650);
             drop(g);
             set_active_segment(&btns, idx);
         });
     }
     mag_track.append(&z_15);
-    mag_track.append(&z_21);
-    mag_track.append(&z_26);
-    mag_track.append(&z_30);
+    mag_track.append(&z_20);
+    mag_track.append(&z_24);
+    mag_track.append(&z_28);
     ctrl_card.append(&mag_track);
-
-    // 3. Segmented Control: Camera Spring Physics
-    let spr_cap = Label::new(Some("SPRING PHYSICS RESPONSE"));
-    spr_cap.add_css_class("section-cap");
-    spr_cap.set_halign(Align::Start);
-    ctrl_card.append(&spr_cap);
 
     let spr_track = GtkBox::new(Orientation::Horizontal, 3);
     spr_track.add_css_class("seg-track");
-    let s_cinema = Button::with_label("Cinematic Glide");
+    let s_cinema = Button::with_label("Smooth Glide");
     let s_natural = Button::with_label("Balanced");
-    let s_snappy = Button::with_label("Instant");
+    let s_snappy = Button::with_label("Snappy");
     for b in [&s_cinema, &s_natural, &s_snappy] {
         b.set_hexpand(true);
     }
     let spr_btns = vec![s_cinema.clone(), s_natural.clone(), s_snappy.clone()];
     set_active_segment(&spr_btns, 1);
     for (idx, (btn, k_val)) in [
-        (s_cinema.clone(), 55.0f32),
-        (s_natural.clone(), 95.0f32),
-        (s_snappy.clone(), 185.0f32),
+        (s_cinema.clone(), 38.0f32),
+        (s_natural.clone(), 60.0f32),
+        (s_snappy.clone(), 115.0f32),
     ]
     .into_iter()
     .enumerate()
@@ -1083,7 +1096,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     spr_track.append(&s_snappy);
     ctrl_card.append(&spr_track);
 
-    // 4. Custom Toggle Chips
+    // Toggle Chips
     let tog_row1 = GtkBox::new(Orientation::Horizontal, 6);
     let chip_bake = Button::with_label("● Auto-Zoom MP4: ON");
     chip_bake.add_css_class("toggle-chip-on");
@@ -1133,40 +1146,36 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     tog_row1.append(&chip_audio);
     ctrl_card.append(&tog_row1);
 
-    bento_cols.append(&ctrl_card);
-    drawer_box.append(&bento_cols);
+    drawer_box.append(&ctrl_card);
 
     // Bottom Status & Quick Open Bar
-    let footer_row = GtkBox::new(Orientation::Horizontal, 8);
+    let footer_row = GtkBox::new(Orientation::Horizontal, 6);
     footer_row.add_css_class("status-strip");
-    let footer_lbl = Label::new(Some(
-        "DRM Cursor Plane #92 Active · 60 FPS Zero-Copy GPU -> ~/Videos",
-    ));
+    let footer_lbl = Label::new(Some("60 FPS Zero-Copy GPU -> ~/Videos"));
     footer_lbl.set_hexpand(true);
     footer_lbl.set_halign(Align::Start);
 
     let play_last_btn = Button::with_label("▶ Play Latest");
     play_last_btn.add_css_class("action-chip");
-    let open_videos_btn = Button::with_label("📂 ~/Videos");
+    let open_videos_btn = Button::with_label("📂 Videos");
 
     footer_row.append(&footer_lbl);
     footer_row.append(&play_last_btn);
     footer_row.append(&open_videos_btn);
     drawer_box.append(&footer_row);
 
-    revealer.set_child(Some(&drawer_box));
-    shell_box.append(&revealer);
+    shell_box.append(&drawer_box);
     window.set_child(Some(&shell_box));
 
     // =========================================================================
     // MORPHING & NON-BLOCKING RECORDING HANDLERS
     // =========================================================================
     {
-        let rev = revealer.clone();
+        let drw = drawer_box.clone();
         let win = window.clone();
         expand_btn.connect_clicked(move |btn| {
-            let expand = !rev.reveals_child();
-            rev.set_reveal_child(expand);
+            let expand = !drw.is_visible();
+            drw.set_visible(expand);
             if expand {
                 btn.set_label("Studio ▴");
                 btn.remove_css_class("studio-pill");
@@ -1189,6 +1198,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let r_btn = rec_btn.clone();
         let shell = shell_box.clone();
         let footer = footer_lbl.clone();
+        let drw = drawer_box.clone();
+        let exp_b = expand_btn.clone();
+        let win = window.clone();
         let busy_flag = bg_zoom_busy.clone();
 
         rec_btn.connect_clicked(move |_| {
@@ -1210,7 +1222,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
                     if do_zoom && !zoom_events.is_empty() {
                         s_lbl.set_text("Zooming…");
-                        footer.set_text("⚡ Baking NVENC Cursor Auto-Zoom into MP4...");
+                        footer.set_text("⚡ Baking 60fps Sub-Pixel Auto-Zoom...");
                         busy_flag.store(true, Ordering::Relaxed);
                         let st_bg = st.clone();
                         let busy_bg = busy_flag.clone();
@@ -1222,10 +1234,18 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                         });
                     } else {
                         s_lbl.set_text("Saved ✓");
-                        footer.set_text(&format!("✔ Saved: {}", raw_path.display()));
+                        footer.set_text("✔ Saved to ~/Videos");
                     }
                 }
-            } else if let Ok(path) = st.lock().start_recording() {
+            } else if let Ok(_path) = st.lock().start_recording() {
+                // Automatically collapse Studio popover into compact Dynamic Island on Record
+                if drw.is_visible() {
+                    drw.set_visible(false);
+                    exp_b.set_label("Studio ▾");
+                    exp_b.remove_css_class("studio-pill-open");
+                    exp_b.add_css_class("studio-pill");
+                    win.set_default_size(1, 1);
+                }
                 r_icon.set_from_file(Some(asset_path("icon-stop.svg")));
                 r_lbl.set_text("Stop");
                 r_btn.remove_css_class("shutter-rec");
@@ -1235,10 +1255,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 s_lbl.add_css_class("island-timer-rec");
                 shell.remove_css_class("island-shell");
                 shell.add_css_class("island-shell-rec");
-                footer.set_text(&format!(
-                    "● Recording 1080p60 + Live Cursor Auto-Zoom -> {}",
-                    path.display()
-                ));
+                footer.set_text("● Recording 1080p60 + Auto-Zoom...");
             }
         });
     }
@@ -1274,51 +1291,59 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         });
     }
 
-    // 40ms (25 Hz) Non-blocking Telemetry Tick
+    // 16ms (60 Hz) High-Frequency Non-blocking Telemetry Tick
     {
         let st = state.clone();
         let z_lbl = zoom_pill_lbl.clone();
         let z_btn = zoom_pill_btn.clone();
+        let c_lbl = coord_lbl.clone();
         let s_lbl = status_lbl.clone();
         let f_lbl = footer_lbl.clone();
-        let rev = revealer.clone();
+        let drw = drawer_box.clone();
         let r_area = radar_area.clone();
         let wave = wave_indicator.clone();
         let z_hist = zoom_history.clone();
         let busy_flag = bg_zoom_busy.clone();
         let mut last_z_str = String::new();
+        let mut last_c_str = String::new();
         let mut last_s_str = String::new();
         let mut was_zoomed = false;
         let mut was_busy = false;
+        let mut ui_div = 0u32;
 
-        glib::timeout_add_local(Duration::from_millis(40), move || {
+        glib::timeout_add_local(Duration::from_millis(16), move || {
             let Some(mut g) = st.try_lock() else {
                 return ControlFlow::Continue;
             };
             g.tick();
             let vp = g.last_viewport;
             let cur = g.last_cursor;
+            let target_z = g.zoom_cfg.target_zoom;
             let is_rec = g.encoder_session.is_some();
             let elapsed = g.recording_elapsed_sec();
             let last_saved = g.last_saved_file.clone();
             drop(g);
 
+            ui_div = ui_div.wrapping_add(1);
+            // Throttle GTK label/canvas redraws to ~30Hz while keeping telemetry sampling at 60Hz
+            if ui_div % 2 != 0 {
+                return ControlFlow::Continue;
+            }
+
             let is_busy = busy_flag.load(Ordering::Relaxed);
             if was_busy && !is_busy {
                 s_lbl.set_text("HyperGSR");
-                if let Some(ref saved) = last_saved {
-                    f_lbl.set_text(&format!("✔ Saved Auto-Zoom MP4: {saved}"));
+                if last_saved.is_some() {
+                    f_lbl.set_text("✔ Saved Smooth Auto-Zoom MP4 -> ~/Videos");
                 }
             }
             was_busy = is_busy;
 
             let is_zoomed = vp.zoom > 1.06;
-            let px = (cur.smooth_x * 1920.0) as i32;
-            let py = (cur.smooth_y * 1080.0) as i32;
             let new_z = if is_zoomed {
-                format!("{:.2}× ({px},{py})", vp.zoom)
+                format!("{:.1}× Zoom", vp.zoom)
             } else {
-                format!("1.00× ({px},{py})")
+                format!("{:.1}× Auto", target_z)
             };
             if new_z != last_z_str {
                 z_lbl.set_text(&new_z);
@@ -1349,9 +1374,17 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 wave.queue_draw();
             }
 
-            if rev.reveals_child() {
+            if drw.is_visible() {
+                let px = (cur.smooth_x * 1920.0) as i32;
+                let py = (cur.smooth_y * 1080.0) as i32;
+                let new_c = format!("DRM #92 · ({px}, {py}) · {:.2}×", vp.zoom);
+                if new_c != last_c_str {
+                    c_lbl.set_text(&new_c);
+                    last_c_str = new_c;
+                }
+
                 let mut h_buf = z_hist.borrow_mut();
-                if h_buf.len() >= 64 {
+                if h_buf.len() >= 72 {
                     h_buf.pop_front();
                 }
                 h_buf.push_back(vp.zoom);
@@ -1360,6 +1393,36 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             }
 
             ControlFlow::Continue
+        });
+    }
+
+    if std::env::var("HYPERGSR_OPEN_STUDIO").as_deref() == Ok("1") {
+        drawer_box.set_visible(true);
+        expand_btn.set_label("Studio ▴");
+        expand_btn.remove_css_class("studio-pill");
+        expand_btn.add_css_class("studio-pill-open");
+    }
+    if std::env::var("HYPERGSR_LIGHT_THEME").as_deref() == Ok("1") {
+        gtk4::prelude::ButtonExt::emit_clicked(&theme_btn);
+    }
+
+    if let Ok(shot_path) = std::env::var("HYPERGSR_SCREENSHOT_PATH") {
+        let win_shot = window.clone();
+        let shell_shot = shell_box.clone();
+        glib::timeout_add_local_once(Duration::from_millis(650), move || {
+            let paintable = gtk4::WidgetPaintable::new(Some(&shell_shot));
+            let w = shell_shot.width().max(1);
+            let h = shell_shot.height().max(1);
+            let snap = gtk4::Snapshot::new();
+            gdk4::prelude::PaintableExt::snapshot(&paintable, &snap, w as f64, h as f64);
+            if let Some(node) = snap.to_node() {
+                if let Some(renderer) = gtk4::prelude::NativeExt::renderer(&win_shot) {
+                    let rect = gtk4::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+                    let tex = gtk4::prelude::GskRendererExt::render_texture(&renderer, &node, Some(&rect));
+                    let _ = gdk4::prelude::TextureExt::save_to_png(&tex, &shot_path);
+                }
+            }
+            win_shot.close();
         });
     }
 

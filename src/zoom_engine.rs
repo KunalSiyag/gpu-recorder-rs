@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AutoZoomMode {
-    /// Zooms into cursor on click, holds for `hold_duration_ms`, then smoothly zooms out
+    /// Zooms into cursor on click, holds briefly (`hold_duration_ms`), then smoothly returns to 1.0x
     ClickToZoom,
-    /// Automatically zooms in when cursor slows down / dwells on UI elements and pans smoothly
+    /// Screen Studio style: zooms in on clicks or glide-and-settle focus events, holds briefly (~1.6s),
+    /// and automatically returns to 1.0x wide view when idle or moving across the screen.
     SmartCursorFollow,
     /// Follows explicit/auto-generated timeline keyframes (Screen Studio style)
     TimelineKeyframes,
@@ -39,11 +40,11 @@ pub struct ZoomKeyframe {
 pub struct ZoomConfig {
     pub enabled: bool,
     pub mode: AutoZoomMode,
-    /// Target magnification when zoomed in (e.g. 2.0x to 3.5x)
+    /// Target magnification when zoomed in (e.g. 2.0x Studio default)
     pub target_zoom: f32,
-    /// Spring stiffness k for camera zoom/pan (e.g. 85.0 for smooth cinematic glide)
+    /// Spring stiffness k for camera zoom/pan (e.g. 55.0 for smooth Screen Studio glide)
     pub spring_stiffness: f32,
-    /// Hold time in ms after a click or dwell trigger before zooming back out
+    /// Hold time in ms after a click or settle trigger before zooming back out to 1.0x
     pub hold_duration_ms: u64,
     /// Deadzone radius in normalized viewport coordinates so small cursor wiggles don't pan the camera
     pub deadzone_radius: f32,
@@ -56,10 +57,10 @@ impl Default for ZoomConfig {
         Self {
             enabled: true,
             mode: AutoZoomMode::SmartCursorFollow,
-            target_zoom: 2.15,
-            spring_stiffness: 95.0,
-            hold_duration_ms: 2200,
-            deadzone_radius: 0.045,
+            target_zoom: 2.00,
+            spring_stiffness: 60.0,
+            hold_duration_ms: 1650,
+            deadzone_radius: 0.065,
             motion_blur_strength: 0.35,
         }
     }
@@ -110,6 +111,10 @@ pub struct ZoomEngine {
     target_y: f32,
     target_zoom: f32,
     active_until_ms: u64,
+    cooldown_until_ms: u64,
+    last_trigger_x: f32,
+    last_trigger_y: f32,
+    armed_after_travel: bool,
     last_step_ms: u64,
     next_keyframe_id: u64,
     pub keyframes: Vec<ZoomKeyframe>,
@@ -128,6 +133,10 @@ impl ZoomEngine {
             target_y: 0.5,
             target_zoom: 1.0,
             active_until_ms: 0,
+            cooldown_until_ms: 0,
+            last_trigger_x: 0.5,
+            last_trigger_y: 0.5,
+            armed_after_travel: true,
             last_step_ms: 0,
             next_keyframe_id: 4,
             keyframes: Vec::new(),
@@ -141,24 +150,24 @@ impl ZoomEngine {
             ZoomKeyframe {
                 id: 1,
                 start_ms: 800,
-                end_ms: 3200,
+                end_ms: 3000,
                 target_x: 0.28,
                 target_y: 0.34,
-                zoom_scale: 2.1,
+                zoom_scale: 2.0,
                 label: "Code Editor Focus".into(),
             },
             ZoomKeyframe {
                 id: 2,
-                start_ms: 4200,
-                end_ms: 6800,
+                start_ms: 4400,
+                end_ms: 6600,
                 target_x: 0.72,
                 target_y: 0.48,
-                zoom_scale: 2.35,
+                zoom_scale: 2.15,
                 label: "Terminal & GPU Metrics".into(),
             },
             ZoomKeyframe {
                 id: 3,
-                start_ms: 7800,
+                start_ms: 8000,
                 end_ms: 10200,
                 target_x: 0.52,
                 target_y: 0.76,
@@ -201,9 +210,15 @@ impl ZoomEngine {
         self.target_y = y.clamp(0.0, 1.0);
         self.target_zoom = zoom.clamp(1.0, 4.0);
         self.active_until_ms = now_ms + hold_ms;
+        self.last_trigger_x = self.target_x;
+        self.last_trigger_y = self.target_y;
     }
 
     /// Step the spring-damper virtual camera in O(1) time.
+    /// Follows Screen Studio's bounded-segment model:
+    /// - Zooms in ONLY on intentional events (clicks/cursor-shape changes or a fresh glide-and-settle to a new UI area)
+    /// - Holds for `hold_duration_ms` (~1.65s), panning smoothly only if cursor leaves the deadzone
+    /// - Automatically returns to `1.0x` wide view after hold expires or when moving fast across the screen
     pub fn step(
         &mut self,
         now_ms: u64,
@@ -219,6 +234,14 @@ impl ZoomEngine {
         };
         self.last_step_ms = now_ms;
 
+        // Track if cursor has traveled far enough from the last trigger point to arm a new settle-zoom
+        let dist_from_trigger = ((cursor.smooth_x - self.last_trigger_x).powi(2)
+            + (cursor.smooth_y - self.last_trigger_y).powi(2))
+        .sqrt();
+        if dist_from_trigger > 0.14 || cursor.speed > 0.55 {
+            self.armed_after_travel = true;
+        }
+
         if !cfg.enabled {
             self.target_x = 0.5;
             self.target_y = 0.5;
@@ -231,15 +254,17 @@ impl ZoomEngine {
                         self.target_y = cursor.smooth_y;
                         self.target_zoom = cfg.target_zoom.clamp(1.1, 4.0);
                         self.active_until_ms = now_ms + cfg.hold_duration_ms;
+                        self.last_trigger_x = cursor.smooth_x;
+                        self.last_trigger_y = cursor.smooth_y;
                     } else if now_ms < self.active_until_ms {
-                        // Gently pan with cursor while zoomed in if cursor leaves deadzone
+                        // Deadzone-filtered pan while zoomed in
                         let dx = cursor.smooth_x - self.target_x;
                         let dy = cursor.smooth_y - self.target_y;
                         let dist = (dx * dx + dy * dy).sqrt();
                         if dist > cfg.deadzone_radius {
                             let pull = (dist - cfg.deadzone_radius) / dist;
-                            self.target_x += dx * pull * 0.35;
-                            self.target_y += dy * pull * 0.35;
+                            self.target_x += dx * pull * 0.25;
+                            self.target_y += dy * pull * 0.25;
                         }
                     } else {
                         self.target_x = 0.5;
@@ -248,33 +273,50 @@ impl ZoomEngine {
                     }
                 }
                 AutoZoomMode::SmartCursorFollow => {
-                    // Screen Studio automatic cursor follow:
-                    // 1. Fast cross-screen travel (> 0.95 screen-widths/sec) pulls back toward wide view
-                    // 2. Settling/working in a region (dwell > 220ms) or clicking/interacting zooms in smoothly
-                    if clicked_now || (dwell_ms > 220 && cursor.speed < 0.45) {
+                    // Edge-triggered settle detection: triggers ONCE when the cursor arrives at a new UI region
+                    // and settles for 240..420ms. Sitting idle afterwards does NOT keep extending the zoom!
+                    let fresh_settle = self.armed_after_travel
+                        && (240..=420).contains(&dwell_ms)
+                        && cursor.speed < 0.28
+                        && now_ms >= self.cooldown_until_ms;
+
+                    if clicked_now || fresh_settle {
+                        self.armed_after_travel = false;
+                        self.last_trigger_x = cursor.smooth_x;
+                        self.last_trigger_y = cursor.smooth_y;
+                        self.target_x = cursor.smooth_x;
+                        self.target_y = cursor.smooth_y;
                         self.target_zoom = cfg.target_zoom.clamp(1.1, 4.0);
                         self.active_until_ms = now_ms + cfg.hold_duration_ms;
-                    } else if cursor.speed > 0.95 {
+                    } else if cursor.speed > 0.80 {
+                        // Fast cross-screen travel immediately zooms out to 1.0x wide view
                         self.target_zoom = 1.0;
-                    } else if now_ms > self.active_until_ms && dwell_ms > 4500 {
-                        // Gently return to 1.0x wide view if completely untouched for 4.5s
-                        self.target_zoom = 1.0;
-                    }
-
-                    if self.target_zoom > 1.05 {
+                        self.target_x = 0.5;
+                        self.target_y = 0.5;
+                        self.active_until_ms = 0;
+                        self.cooldown_until_ms = now_ms + 450;
+                    } else if now_ms < self.active_until_ms {
+                        // If user is making small precision movements near the focus point, allow a short extension,
+                        // otherwise let the hold timer expire cleanly back to 1.0x!
                         let dx = cursor.smooth_x - self.target_x;
                         let dy = cursor.smooth_y - self.target_y;
-                        if (dx * dx + dy * dy).sqrt() > cfg.deadzone_radius * 0.4 {
-                            self.target_x = cursor.smooth_x;
-                            self.target_y = cursor.smooth_y;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        if dist > cfg.deadzone_radius {
+                            let pull = (dist - cfg.deadzone_radius) / dist;
+                            self.target_x += dx * pull * 0.28;
+                            self.target_y += dy * pull * 0.28;
                         }
                     } else {
+                        // Hold timer expired -> smoothly return to 1.0x wide view!
+                        if self.target_zoom > 1.01 {
+                            self.cooldown_until_ms = now_ms + 750;
+                        }
+                        self.target_zoom = 1.0;
                         self.target_x = 0.5;
                         self.target_y = 0.5;
                     }
                 }
                 AutoZoomMode::TimelineKeyframes => {
-                    // Loop timeline over 12-second cycle in live preview or absolute recording clock
                     let cycle_ms = now_ms % 12000;
                     if let Some(kf) = self
                         .keyframes
@@ -301,12 +343,15 @@ impl ZoomEngine {
         }
 
         // Critically-damped spring integration for (cam_x, cam_y, cam_zoom)
-        let k = cfg.spring_stiffness.clamp(20.0, 300.0);
-        let c = 2.0 * k.sqrt();
+        // Separate slightly softer stiffness for pan so camera glides like a physical fluid head
+        let k_zoom = cfg.spring_stiffness.clamp(20.0, 260.0);
+        let c_zoom = 2.0 * k_zoom.sqrt();
+        let k_pan = (k_zoom * 0.78).clamp(18.0, 220.0);
+        let c_pan = 2.0 * k_pan.sqrt();
 
-        let ax = -k * (self.cam_x - self.target_x) - c * self.vel_x;
-        let ay = -k * (self.cam_y - self.target_y) - c * self.vel_y;
-        let az = -k * (self.cam_zoom - self.target_zoom) - c * self.vel_zoom;
+        let ax = -k_pan * (self.cam_x - self.target_x) - c_pan * self.vel_x;
+        let ay = -k_pan * (self.cam_y - self.target_y) - c_pan * self.vel_y;
+        let az = -k_zoom * (self.cam_zoom - self.target_zoom) - c_zoom * self.vel_zoom;
 
         self.vel_x += ax * dt;
         self.vel_y += ay * dt;
