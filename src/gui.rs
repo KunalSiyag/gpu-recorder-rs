@@ -854,6 +854,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
     vis_card.append(&radar_area);
 
+    let footer_lbl = Label::new(Some("60 FPS Native GPU -> ~/Videos"));
+    footer_lbl.set_hexpand(true);
+    footer_lbl.set_halign(Align::Start);
+
     let vis_btn_row = GtkBox::new(Orientation::Horizontal, 6);
     let test_zoom_btn = Button::with_label("🔒 Lock / Unlock Zoom");
     test_zoom_btn.add_css_class("action-chip");
@@ -862,16 +866,31 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     let reset_zoom_btn = Button::with_label("1.0× Wide");
     {
         let st = state.clone();
-        test_zoom_btn.connect_clicked(move |_| {
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
+        test_zoom_btn.connect_clicked(move |btn| {
             let mut g = st.lock();
             let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
             let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
             let target_z = g.zoom_cfg.target_zoom;
-            g.zoom_engine.toggle_manual_lock(cx, cy, target_z);
+            let locked = g.zoom_engine.toggle_manual_lock(cx, cy, target_z);
+            g.tick();
+            drop(g);
+            if locked {
+                btn.set_label("🔓 Unlock Zoom");
+                f_lbl.set_text(&format!("🔒 Manual Zoom Locked at {target_z:.1}×"));
+            } else {
+                btn.set_label("🔒 Lock / Unlock Zoom");
+                f_lbl.set_text("🔓 Manual Zoom Unlocked (1.0× Wide)");
+            }
+            r_area.queue_draw();
         });
     }
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
+        let lock_b = test_zoom_btn.clone();
         pulse_zoom_btn.connect_clicked(move |_| {
             let mut g = st.lock();
             let now = g.now_ms();
@@ -882,48 +901,88 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.cursor_tracker.update(now, cx, cy, true, false, &cur_cfg);
             g.zoom_engine
                 .trigger_manual_zoom(cx, cy, target_z, now, 1650);
+            g.tick();
+            drop(g);
+            lock_b.set_label("🔒 Lock / Unlock Zoom");
+            f_lbl.set_text(&format!("⚡ Triggered 1.7s Auto-Zoom Pulse ({target_z:.1}×)"));
+            r_area.queue_draw();
         });
     }
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
+        let lock_b = test_zoom_btn.clone();
         zoom_pill_btn.connect_clicked(move |_| {
             let mut g = st.lock();
             let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
             let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
             let target_z = g.zoom_cfg.target_zoom;
-            g.zoom_engine.toggle_manual_lock(cx, cy, target_z);
+            let locked = g.zoom_engine.toggle_manual_lock(cx, cy, target_z);
+            g.tick();
+            drop(g);
+            if locked {
+                lock_b.set_label("🔓 Unlock Zoom");
+                f_lbl.set_text(&format!("🔒 Manual Zoom Locked at {target_z:.1}×"));
+            } else {
+                lock_b.set_label("🔒 Lock / Unlock Zoom");
+                f_lbl.set_text("🔓 Manual Zoom Unlocked (1.0× Wide)");
+            }
+            r_area.queue_draw();
         });
     }
     // Right-click on Top-Bar Zoom Pill -> Reset immediately to 1.0x Wide
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
+        let lock_b = test_zoom_btn.clone();
         let pill_rclick = GestureClick::new();
         pill_rclick.set_button(3);
         pill_rclick.connect_pressed(move |_, _, _, _| {
             let mut g = st.lock();
             g.zoom_engine.release_manual_lock();
+            g.tick();
+            drop(g);
+            lock_b.set_label("🔒 Lock / Unlock Zoom");
+            f_lbl.set_text("↺ Reset Camera to 1.0× Wide");
+            r_area.queue_draw();
         });
         zoom_pill_btn.add_controller(pill_rclick);
     }
     // Mouse Scroll Wheel on Top-Bar Zoom Pill -> Smoothly dial manual zoom (1.0x .. 3.2x)
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
         let scroll_ctrl = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
         scroll_ctrl.connect_scroll(move |_, _dx, dy| {
             let mut g = st.lock();
             let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
             let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
             let step = if dy < 0.0 { 0.20 } else { -0.20 };
-            g.zoom_engine.adjust_manual_zoom_wheel(cx, cy, step);
+            let new_z = g.zoom_engine.adjust_manual_zoom_wheel(cx, cy, step);
+            g.tick();
+            drop(g);
+            f_lbl.set_text(&format!("🖱️ Wheel Zoom -> {new_z:.1}×"));
+            r_area.queue_draw();
             glib::Propagation::Stop
         });
         zoom_pill_btn.add_controller(scroll_ctrl);
     }
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
+        let lock_b = test_zoom_btn.clone();
         reset_zoom_btn.connect_clicked(move |_| {
             let mut g = st.lock();
             g.zoom_engine.release_manual_lock();
+            g.tick();
+            drop(g);
+            lock_b.set_label("🔒 Lock / Unlock Zoom");
+            f_lbl.set_text("↺ Reset Camera to 1.0× Wide");
+            r_area.queue_draw();
         });
     }
     vis_btn_row.append(&test_zoom_btn);
@@ -977,25 +1036,31 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     {
         let st = state.clone();
         let btns = mode_btns.clone();
+        let f_lbl = footer_lbl.clone();
         m_follow.connect_clicked(move |_| {
             st.lock().zoom_cfg.mode = AutoZoomMode::SmartCursorFollow;
             set_active_segment(&btns, 0);
+            f_lbl.set_text("✓ Camera Mode: Auto + Combo");
         });
     }
     {
         let st = state.clone();
         let btns = mode_btns.clone();
+        let f_lbl = footer_lbl.clone();
         m_combo_only.connect_clicked(move |_| {
             st.lock().zoom_cfg.mode = AutoZoomMode::Manual;
             set_active_segment(&btns, 1);
+            f_lbl.set_text("✓ Camera Mode: Manual Combo Only");
         });
     }
     {
         let st = state.clone();
         let btns = mode_btns.clone();
+        let f_lbl = footer_lbl.clone();
         m_click.connect_clicked(move |_| {
             st.lock().zoom_cfg.mode = AutoZoomMode::ClickToZoom;
             set_active_segment(&btns, 2);
+            f_lbl.set_text("✓ Camera Mode: Click-to-Zoom");
         });
     }
     mode_track.append(&m_follow);
@@ -1054,49 +1119,75 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let btns = combo_preset_btns.clone();
         let rec_b = record_combo_btn.clone();
         let learn_flag = learning_combo.clone();
+        let f_lbl = footer_lbl.clone();
         btn.connect_clicked(move |_| {
             learn_flag.store(false, Ordering::Relaxed);
+            let short = binding.short_label();
             st.lock().zoom_cfg.combo_binding = binding.clone();
             set_active_segment(&btns, idx);
             rec_b.set_label("🎯 Record Combo…");
             rec_b.remove_css_class("action-chip");
+            f_lbl.set_text(&format!("✓ Zoom Combo: {short}"));
         });
     }
 
     {
         let learn_flag = learning_combo.clone();
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
         record_combo_btn.connect_clicked(move |btn| {
             let now_learning = !learn_flag.load(Ordering::Relaxed);
             learn_flag.store(now_learning, Ordering::Relaxed);
             if now_learning {
                 btn.set_label("● Press Key, Click, or Shake…");
                 btn.add_css_class("action-chip");
+                f_lbl.set_text("🎯 Listening: Press any key/combo, Mid/Right-click, or Shake cursor!");
             } else {
                 let lbl = st.lock().zoom_cfg.combo_binding.short_label();
                 btn.set_label(&lbl);
+                f_lbl.set_text(&format!("✓ Zoom Combo: {lbl}"));
             }
         });
     }
 
-    // Allow right-click / middle-click / side-click / modifier+click directly on "Record Combo…" to bind!
+    // Window-level mouse click listener for "Record Combo…" AND live custom mouse combo triggering
     {
         let learn_flag = learning_combo.clone();
         let st = state.clone();
         let btns = combo_preset_btns.clone();
         let rec_b = record_combo_btn.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
         let bind_click = GestureClick::new();
         bind_click.set_button(0);
+        bind_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
         bind_click.connect_pressed(move |gesture, n_press, _, _| {
-            if !learn_flag.load(Ordering::Relaxed) {
-                return;
-            }
             let btn_num = gesture.current_button();
             let mods = gesture.current_event_state();
             let ctrl = mods.contains(gdk4::ModifierType::CONTROL_MASK);
             let alt = mods.contains(gdk4::ModifierType::ALT_MASK);
             let shift = mods.contains(gdk4::ModifierType::SHIFT_MASK);
             let super_key = mods.contains(gdk4::ModifierType::SUPER_MASK);
+
+            if !learn_flag.load(Ordering::Relaxed) {
+                // Allow middle-click or modifier+click on the window to trigger manual zoom
+                if btn_num == 2 || (btn_num == 1 && ctrl) {
+                    let mut g = st.lock();
+                    let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
+                    let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
+                    let tz = g.zoom_cfg.target_zoom;
+                    let locked = g.zoom_engine.toggle_manual_lock(cx, cy, tz);
+                    g.tick();
+                    drop(g);
+                    f_lbl.set_text(if locked {
+                        "🔒 Manual Zoom Locked"
+                    } else {
+                        "🔓 Manual Zoom Unlocked"
+                    });
+                    r_area.queue_draw();
+                }
+                return;
+            }
 
             // Plain unmodified single left-click is just clicking the button to toggle learning mode
             if btn_num == 1 && !ctrl && !alt && !shift && !super_key && n_press < 2 {
@@ -1149,12 +1240,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             st.lock().zoom_cfg.combo_binding = new_binding;
             learn_flag.store(false, Ordering::Relaxed);
             for b in &btns {
-                b.remove_css_class("seg-active");
+                b.remove_css_class("seg-btn-active");
+                b.add_css_class("seg-btn");
             }
             rec_b.set_label(&lbl);
             rec_b.add_css_class("action-chip");
+            f_lbl.set_text(&format!("✓ Registered Custom Combo: {lbl}"));
         });
-        record_combo_btn.add_controller(bind_click);
+        window.add_controller(bind_click);
     }
 
     // Window-level keyboard listener for "Record Combo…" AND live keyboard combo triggering
@@ -1163,7 +1256,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let st = state.clone();
         let btns = combo_preset_btns.clone();
         let rec_b = record_combo_btn.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
         let key_ctrl = EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
         key_ctrl.connect_key_pressed(move |_, keyval, hw_keycode, mods| {
             let key_name = keyval.name().map(|s| s.to_string()).unwrap_or_default();
             // Ignore bare modifier presses while waiting for the combo
@@ -1224,10 +1320,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 st.lock().zoom_cfg.combo_binding = new_binding;
                 learn_flag.store(false, Ordering::Relaxed);
                 for b in &btns {
-                    b.remove_css_class("seg-active");
+                    b.remove_css_class("seg-btn-active");
+                    b.add_css_class("seg-btn");
                 }
                 rec_b.set_label(&disp);
                 rec_b.add_css_class("action-chip");
+                f_lbl.set_text(&format!("✓ Registered Key Combo: {disp}"));
                 return glib::Propagation::Stop;
             }
 
@@ -1247,7 +1345,15 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
                     let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
                     let tz = g.zoom_cfg.target_zoom;
-                    g.zoom_engine.toggle_manual_lock(cx, cy, tz);
+                    let locked = g.zoom_engine.toggle_manual_lock(cx, cy, tz);
+                    g.tick();
+                    drop(g);
+                    f_lbl.set_text(if locked {
+                        "🔒 Key Combo -> Zoom Locked"
+                    } else {
+                        "🔓 Key Combo -> Zoom Unlocked"
+                    });
+                    r_area.queue_draw();
                     return glib::Propagation::Stop;
                 }
             }
@@ -1258,6 +1364,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
         combo_action_btn.connect_clicked(move |btn| {
             let mut g = st.lock();
             g.zoom_cfg.combo_action = match g.zoom_cfg.combo_action {
@@ -1268,6 +1375,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let lbl = g.zoom_cfg.combo_action.label();
             drop(g);
             btn.set_label(lbl);
+            f_lbl.set_text(&format!("✓ Combo Behavior: {lbl}"));
         });
     }
 
@@ -1361,6 +1469,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     {
         let st = state.clone();
         let btns = mag_btns.clone();
+        let f_lbl = footer_lbl.clone();
+        let r_area = radar_area.clone();
         btn.connect_clicked(move |_| {
             let mut g = st.lock();
             g.zoom_cfg.target_zoom = val;
@@ -1368,8 +1478,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let cx = g.last_cursor.smooth_x;
             let cy = g.last_cursor.smooth_y;
             g.zoom_engine.trigger_manual_zoom(cx, cy, val, now, 1650);
+            g.tick();
             drop(g);
             set_active_segment(&btns, idx);
+            f_lbl.set_text(&format!("✓ Zoom Depth: {val:.1}×"));
+            r_area.queue_draw();
         });
     }
     mag_track.append(&z_15);
@@ -1388,19 +1501,21 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
     let spr_btns = vec![s_cinema.clone(), s_natural.clone(), s_snappy.clone()];
     set_active_segment(&spr_btns, 1);
-    for (idx, (btn, k_val)) in [
-        (s_cinema.clone(), 38.0f32),
-        (s_natural.clone(), 60.0f32),
-        (s_snappy.clone(), 115.0f32),
+    for (idx, (btn, k_val, name)) in [
+        (s_cinema.clone(), 38.0f32, "Smooth Glide"),
+        (s_natural.clone(), 60.0f32, "Balanced"),
+        (s_snappy.clone(), 115.0f32, "Snappy"),
     ]
     .into_iter()
     .enumerate()
     {
         let st = state.clone();
         let btns = spr_btns.clone();
+        let f_lbl = footer_lbl.clone();
         btn.connect_clicked(move |_| {
             st.lock().zoom_cfg.spring_stiffness = k_val;
             set_active_segment(&btns, idx);
+            f_lbl.set_text(&format!("✓ Spring Physics: {name}"));
         });
     }
     spr_track.append(&s_cinema);
@@ -1419,6 +1534,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
         chip_bake.connect_clicked(move |btn| {
             let mut g = st.lock();
             g.auto_apply_zoom_on_stop = !g.auto_apply_zoom_on_stop;
@@ -1429,15 +1545,18 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 btn.set_label("● Auto-Zoom MP4: ON");
                 btn.remove_css_class("toggle-chip");
                 btn.add_css_class("toggle-chip-on");
+                f_lbl.set_text("✓ Auto-Zoom MP4 Post-Pass: ON");
             } else {
                 btn.set_label("○ Auto-Zoom MP4: OFF");
                 btn.remove_css_class("toggle-chip-on");
                 btn.add_css_class("toggle-chip");
+                f_lbl.set_text("○ Auto-Zoom MP4 Post-Pass: OFF (Raw MP4)");
             }
         });
     }
     {
         let st = state.clone();
+        let f_lbl = footer_lbl.clone();
         chip_audio.connect_clicked(move |btn| {
             let mut g = st.lock();
             g.record_audio = !g.record_audio;
@@ -1447,10 +1566,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 btn.set_label("● System Audio: ON");
                 btn.remove_css_class("toggle-chip");
                 btn.add_css_class("toggle-chip-on");
+                f_lbl.set_text("✓ System Desktop Audio: ON");
             } else {
                 btn.set_label("○ System Audio: OFF");
                 btn.remove_css_class("toggle-chip-on");
                 btn.add_css_class("toggle-chip");
+                f_lbl.set_text("○ System Desktop Audio: OFF");
             }
         });
     }
@@ -1463,9 +1584,6 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     // Bottom Status & Quick Open Bar
     let footer_row = GtkBox::new(Orientation::Horizontal, 6);
     footer_row.add_css_class("status-strip");
-    let footer_lbl = Label::new(Some("60 FPS Zero-Copy GPU -> ~/Videos"));
-    footer_lbl.set_hexpand(true);
-    footer_lbl.set_halign(Align::Start);
 
     let play_last_btn = Button::with_label("▶ Play Latest");
     play_last_btn.add_css_class("action-chip");
@@ -1719,10 +1837,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
             if let Some(lbl) = learned_label {
                 for b in &preset_btns {
-                    b.remove_css_class("seg-active");
+                    b.remove_css_class("seg-btn-active");
+                    b.add_css_class("seg-btn");
                 }
                 rec_combo_b.set_label(&lbl);
                 rec_combo_b.add_css_class("action-chip");
+                f_lbl.set_text(&format!("✓ Registered Global Gesture: {lbl}"));
             }
 
             ui_div = ui_div.wrapping_add(1);

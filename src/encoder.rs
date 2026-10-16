@@ -74,9 +74,10 @@ pub struct RecordedZoomEvent {
 }
 
 pub enum RecordingEngineKind {
-    /// Zero-copy DMA-BUF PipeWire + GPU hardware capture via decompiled GSR engine + bridge shim
+    /// Native PipeWire + XDG Desktop Portal + NVENC GPU capture (`hypergsr-pw-capture`)
     ZeroCopyGsr {
         child: Child,
+        stdin: Option<ChildStdin>,
     },
     /// Raw frame pipe to FFmpeg hardware encoder (for synthetic/studio showcase rendering)
     FfmpegPipe {
@@ -97,8 +98,9 @@ pub struct ActiveEncoderSession {
 }
 
 impl ActiveEncoderSession {
-    /// Starts a true zero-copy GPU screen recording session using the system's PipeWire DMA-BUF
-    /// portal stream and our `flatpak-spawn` host-bridge shim. Uses <1% CPU and ~0 RAM overhead.
+    /// Starts a standalone native PipeWire + XDG Desktop Portal + NVENC GPU screen recording
+    /// session (`bin/hypergsr-pw-capture`). Reuses the persisted portal `restore_token` silently
+    /// with zero permission popups and zero Flatpak dependency.
     pub fn start_zero_copy_gpu(
         output_path: impl AsRef<Path>,
         fps: u32,
@@ -109,60 +111,31 @@ impl ActiveEncoderSession {
             std::fs::create_dir_all(parent).ok();
         }
 
-        let shim_dir = Self::ensure_flatpak_spawn_shim()?;
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kunalsiyag".to_string());
-        let token_file = format!(
-            "{home}/.var/app/com.dec05eba.gpu_screen_recorder/config/gpu-screen-recorder/restore_token"
-        );
-        let out_dir = out_path
-            .parent()
-            .unwrap_or_else(|| Path::new("/tmp"))
-            .display()
-            .to_string();
+        let helper_bin = Self::ensure_native_pw_capture_helper()?;
+        let token_file = Self::ensure_portal_restore_token_file()?;
 
-        let mut cmd = Command::new("flatpak");
-        cmd.args([
-            "run",
-            &format!("--filesystem={}:ro", shim_dir.display()),
-            &format!("--filesystem={out_dir}"),
-            &format!("--env=PATH={}:/app/bin:/usr/bin", shim_dir.display()),
-            "--command=gpu-screen-recorder",
-            "com.dec05eba.gpu_screen_recorder",
-            "-w",
-            "portal",
-            "-restore-portal-session",
-            "yes",
-            "-portal-session-token-filepath",
-            &token_file,
-            "-f",
-            &fps.to_string(),
-            "-c",
-            "mp4",
-            "-k",
-            "h264",
-            "-q",
-            "ultra",
-        ]);
-
-        if record_audio {
-            cmd.args(["-a", "default_output"]);
-        }
-
-        cmd.arg("-o")
-            .arg(&out_path)
-            .stdin(Stdio::null())
+        let mut cmd = Command::new(&helper_bin);
+        cmd.arg(&out_path)
+            .arg(&token_file)
+            .arg(fps.to_string())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let child = cmd
+        if record_audio {
+            cmd.arg("audio");
+        }
+
+        let mut child = cmd
             .spawn()
-            .context("Failed to spawn zero-copy gpu-screen-recorder process")?;
+            .context("Failed to spawn standalone hypergsr-pw-capture process")?;
+        let stdin = child.stdin.take();
 
         Ok(Self {
-            kind: RecordingEngineKind::ZeroCopyGsr { child },
+            kind: RecordingEngineKind::ZeroCopyGsr { child, stdin },
             output_path: out_path,
             frames_written: 0,
-            active_backend: "Zero-Copy PipeWire DMA-BUF + GPU".to_string(),
+            active_backend: "Native PipeWire Portal + NVENC GPU".to_string(),
             width: 1920,
             height: 1080,
             fps,
@@ -170,36 +143,61 @@ impl ActiveEncoderSession {
         })
     }
 
-    fn ensure_flatpak_spawn_shim() -> Result<PathBuf> {
+    fn ensure_portal_restore_token_file() -> Result<PathBuf> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kunalsiyag".to_string());
+        let config_dir = PathBuf::from(&home).join(".config/hypergsr");
+        std::fs::create_dir_all(&config_dir)?;
+        let hypergsr_token = config_dir.join("restore_token");
+        let legacy_token = PathBuf::from(&home)
+            .join(".var/app/com.dec05eba.gpu_screen_recorder/config/gpu-screen-recorder/restore_token");
+
+        if !hypergsr_token.exists() && legacy_token.exists() {
+            let _ = std::fs::copy(&legacy_token, &hypergsr_token);
+        }
+        if hypergsr_token.exists() {
+            Ok(hypergsr_token)
+        } else {
+            Ok(legacy_token)
+        }
+    }
+
+    fn ensure_native_pw_capture_helper() -> Result<PathBuf> {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        // Candidate locations for bin/hypergsr-pw-capture
+        let candidates = [
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("bin/hypergsr-pw-capture"),
+            exe_dir.join("../../bin/hypergsr-pw-capture"),
+            PathBuf::from("/home/kunalsiyag/Ambassador/factoryai/gpu-recorder-rs/bin/hypergsr-pw-capture"),
+        ];
+        for cand in &candidates {
+            if cand.exists() {
+                return Ok(cand.clone());
+            }
+        }
+
         let bin_dir = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("bin");
         std::fs::create_dir_all(&bin_dir)?;
-        let shim_path = bin_dir.join("flatpak-spawn");
-        if !shim_path.exists() {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kunalsiyag".to_string());
-            let script = format!(
-                "#!/bin/sh\n\
-                 USER_FLATPAK=\"{home}/.local/share/flatpak/app/com.dec05eba.gpu_screen_recorder\"\n\
-                 SYS_FLATPAK=\"/var/lib/flatpak/app/com.dec05eba.gpu_screen_recorder\"\n\
-                 set -- $(for arg in \"$@\"; do\n\
-                     case \"$arg\" in\n\
-                         \"$SYS_FLATPAK\"*) printf \"%s\\n\" \"${{USER_FLATPAK}}${{arg#$SYS_FLATPAK}}\" ;;\n\
-                         *) printf \"%s\\n\" \"$arg\" ;;\n\
-                     esac\n\
-                 done)\n\
-                 exec /usr/bin/flatpak-spawn \"$@\"\n"
+        let out_bin = bin_dir.join("hypergsr-pw-capture");
+        let src_c = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("src/pw_portal_capture.c");
+        if src_c.exists() {
+            let build_cmd = format!(
+                "gcc -O3 \"{}\" -o \"{}\" $(pkg-config --cflags --libs libpipewire-0.3 libspa-0.2 gio-2.0) /usr/lib/x86_64-linux-gnu/libportal.so.1 -lpthread",
+                src_c.display(),
+                out_bin.display()
             );
-            std::fs::write(&shim_path, script)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&shim_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&shim_path, perms)?;
-            }
+            let _ = Command::new("sh").args(["-c", &build_cmd]).status();
         }
-        Ok(bin_dir)
+        Ok(out_bin)
     }
 
     pub fn start(
@@ -380,12 +378,13 @@ impl ActiveEncoderSession {
 
     pub fn finish(mut self) -> Result<(PathBuf, Vec<RecordedZoomEvent>)> {
         match self.kind {
-            RecordingEngineKind::ZeroCopyGsr { ref mut child } => {
+            RecordingEngineKind::ZeroCopyGsr {
+                ref mut child,
+                ref mut stdin,
+            } => {
+                drop(stdin.take());
                 let pid = child.id().to_string();
-                let _ = Command::new("kill").args(["-INT", &pid]).status();
-                let _ = Command::new("pkill")
-                    .args(["-INT", "-f", "gpu-screen-recorder.*-w portal"])
-                    .status();
+                let _ = Command::new("kill").args(["-TERM", &pid]).status();
                 let _ = child.wait();
             }
             RecordingEngineKind::FfmpegPipe {

@@ -366,7 +366,7 @@ impl ZoomEngine {
     }
 
     /// Directly toggle manual zoom lock IN / OUT at the current cursor position.
-    pub fn toggle_manual_lock(&mut self, x: f32, y: f32, default_zoom: f32) {
+    pub fn toggle_manual_lock(&mut self, x: f32, y: f32, default_zoom: f32) -> bool {
         self.manual_locked = !self.manual_locked;
         if self.manual_locked {
             self.manual_zoom_level = default_zoom.clamp(1.25, 3.5);
@@ -379,10 +379,11 @@ impl ZoomEngine {
             self.target_zoom = 1.0;
             self.active_until_ms = 0;
         }
+        self.manual_locked
     }
 
     /// Adjust zoom depth via mouse scroll wheel (`delta_zoom > 0` zooms in, `< 0` zooms out).
-    pub fn adjust_manual_zoom_wheel(&mut self, x: f32, y: f32, delta_zoom: f32) {
+    pub fn adjust_manual_zoom_wheel(&mut self, x: f32, y: f32, delta_zoom: f32) -> f32 {
         let base = if self.manual_locked {
             self.manual_zoom_level
         } else {
@@ -403,6 +404,7 @@ impl ZoomEngine {
             self.target_x = x.clamp(0.0, 1.0);
             self.target_y = y.clamp(0.0, 1.0);
         }
+        self.manual_zoom_level
     }
 
     pub fn release_manual_lock(&mut self) {

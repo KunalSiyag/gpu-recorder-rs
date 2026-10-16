@@ -458,6 +458,15 @@ impl Drop for X11CursorConn {
 
 impl CursorTracker {
     pub fn new() -> Self {
+        let drm_cursor = DrmCursorReader::try_open();
+        // Never open or poll XWayland (`XQueryPointer`) when DRM hardware cursor plane is
+        // available on Wayland, because rootless XWayland blocks synchronous X11 requests
+        // when native Wayland windows have focus.
+        let x11_conn = if drm_cursor.is_some() {
+            None
+        } else {
+            X11CursorConn::try_open()
+        };
         Self {
             samples: [CursorSample::default(); CURSOR_HISTORY_CAP],
             head: 0,
@@ -476,26 +485,21 @@ impl CursorTracker {
             dwell_anchor: (0.5, 0.5),
             dwell_start_ms: 0,
             last_motion_ms: 0,
-            drm_cursor: DrmCursorReader::try_open(),
-            x11_conn: X11CursorConn::try_open(),
+            drm_cursor,
+            x11_conn,
         }
     }
 
     /// Queries the live hardware cursor plane on `/dev/dri/card1` first (works across all
-    /// native Wayland and XWayland windows on COSMIC), combined with X11 button/modifier/keymap state.
+    /// native Wayland and XWayland windows on COSMIC in <10 µs without blocking), falling back
+    /// to X11 only on pure Xorg sessions.
     pub fn poll_system_input(&self) -> Option<(f32, f32, SystemInputState)> {
-        let x11_snap = self.x11_conn.as_ref().and_then(|x| x.query_pointer_and_keys());
-        let mut input = x11_snap.map(|(_, _, s)| s).unwrap_or_default();
-
         if let Some(ref drm) = self.drm_cursor {
-            if let Some((nx, ny, shape_changed)) = drm.query_cursor() {
-                if shape_changed {
-                    input.left_down = true;
-                }
-                return Some((nx, ny, input));
+            if let Some((nx, ny, _shape_changed)) = drm.query_cursor() {
+                return Some((nx, ny, SystemInputState::default()));
             }
         }
-        x11_snap
+        self.x11_conn.as_ref().and_then(|x| x.query_pointer_and_keys())
     }
 
     pub fn poll_system_pointer(&self) -> Option<(f32, f32, bool, bool)> {
