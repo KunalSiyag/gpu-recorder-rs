@@ -1,0 +1,18 @@
+#!/bin/sh
+# Intercepts hardcoded /var/lib/flatpak paths in gpu-screen-recorder and rewrites them
+# to the user's ~/.local/share/flatpak installation before invoking /usr/bin/flatpak-spawn.
+USER_FLATPAK="/home/kunalsiyag/.local/share/flatpak/app/com.dec05eba.gpu_screen_recorder"
+SYS_FLATPAK="/var/lib/flatpak/app/com.dec05eba.gpu_screen_recorder"
+
+set -- $(for arg in "$@"; do
+    case "$arg" in
+        "$SYS_FLATPAK"*)
+            printf "%s\n" "${USER_FLATPAK}${arg#$SYS_FLATPAK}"
+            ;;
+        *)
+            printf "%s\n" "$arg"
+            ;;
+    esac
+done)
+
+exec /usr/bin/flatpak-spawn "$@"

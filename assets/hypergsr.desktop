@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=HyperGSR Dynamic Island Recorder
+Comment=Zero-Copy GPU Screen Recorder with Spring Cursor Auto-Zoom
+Exec=/home/kunalsiyag/Ambassador/factoryai/gpu-recorder-rs/target/release/gpu-recorder-rs
+Icon=/home/kunalsiyag/Ambassador/factoryai/gpu-recorder-rs/assets/hypergsr-logo.svg
+Terminal=false
+Type=Application
+Categories=AudioVideo;Recorder;Video;

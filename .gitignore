@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+
+# Local test recordings & temporary captures
+/recordings/
+*.mp4
+*.mkv
+*.webm
+*_telemetry.json
+
+# OS / Editor files
+.DS_Store
+*.swp
+*.swo
+*~
