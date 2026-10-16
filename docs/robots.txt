@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://kunalsiyag.github.io/gpu-recorder-rs/sitemap.xml

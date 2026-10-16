@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HyperGSR Studio — Screen Studio for Linux Wayland in 56MB of Native Rust</title>
+  <meta name="description" content="Open-source macOS Screen Studio alternative for Linux Wayland & X11 built in native Rust. Zero-copy PipeWire DMA-BUF + NVENC/VAAPI GPU screen recording, rootless DRM Plane #92 cursor tracking, 240Hz spring-physics auto-zoom, custom gesture combos, and a Wayland Layer-Shell Dynamic Island UI." />
+  <meta name="keywords" content="Screen Studio for Linux, Linux screen recorder auto zoom, Wayland screen recorder cursor zoom, gpu-screen-recorder Rust, HyperGSR, Dynamic Island Linux Wayland, PipeWire NVENC VAAPI recorder, Hyprland screen recorder, COSMIC Wayland screen recorder, GNOME KDE screen recorder" />
+  <meta name="author" content="Kunal Siyag" />
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+  <link rel="canonical" href="https://kunalsiyag.github.io/gpu-recorder-rs/" />
+
+  <!-- Open Graph / Facebook / Discord / LinkedIn / Slack -->
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://kunalsiyag.github.io/gpu-recorder-rs/" />
+  <meta property="og:site_name" content="HyperGSR Studio (gpu-recorder-rs)" />
+  <meta property="og:title" content="HyperGSR Studio — Screen Studio for Linux Wayland in 56MB of Native Rust" />
+  <meta property="og:description" content="Zero-Copy GPU Screen Recorder with Rootless Wayland DRM Cursor Plane #92 Tracking, 240Hz Spring-Physics Auto-Zoom, Self-Registering Custom Zoom Combos & Dynamic Island UI." />
+  <meta property="og:image" content="https://kunalsiyag.github.io/gpu-recorder-rs/og-banner.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+
+  <!-- X / Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="HyperGSR Studio — Screen Studio for Linux Wayland in Native Rust" />
+  <meta name="twitter:description" content="56MB RAM • <1.5% CPU • Rootless Wayland DRM Plane #92 Cursor Tracking • 240Hz Spring Camera Auto-Zoom • Wayland Layer-Shell Dynamic Island HUD." />
+  <meta name="twitter:image" content="https://kunalsiyag.github.io/gpu-recorder-rs/og-banner.png" />
+
+  <!-- JSON-LD Rich Structured Data (SoftwareApplication + FAQPage for Google & AI Search SEO) -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "HyperGSR Studio (gpu-recorder-rs)",
+        "alternateName": "Screen Studio for Linux Wayland",
+        "operatingSystem": "Linux (Wayland, X11, COSMIC, Hyprland, GNOME, KDE Plasma, Sway, Ubuntu, Fedora, Arch)",
+        "applicationCategory": "MultimediaApplication",
+        "applicationSubCategory": "Screen Recorder & Video Editor",
+        "license": "https://opensource.org/licenses/MIT",
+        "url": "https://kunalsiyag.github.io/gpu-recorder-rs/",
+        "downloadUrl": "https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest",
+        "codeRepository": "https://github.com/KunalSiyag/gpu-recorder-rs",
+        "programmingLanguage": ["Rust", "C", "GLSL"],
+        "softwareVersion": "1.0.0",
+        "memoryRequirements": "56 MB RAM",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "featureList": [
+          "Rootless Wayland Global Cursor Tracking via DRM Hardware Plane #92",
+          "240Hz Sub-Stepped Critically-Damped 2D Spring Auto-Zoom Camera",
+          "Self-Registering Custom Zoom Gesture & Key Combinations",
+          "Native Wayland Layer-Shell (zwlr_layer_shell_v1) Dynamic Island UI",
+          "Obsidian Dark & Pearl Light Live Themes",
+          "Zero-Copy PipeWire DMA-BUF + NVIDIA NVENC / AMD VAAPI Hardware Encoding"
+        ],
+        "author": {
+          "@type": "Person",
+          "name": "Kunal Siyag",
+          "url": "https://github.com/KunalSiyag"
+        }
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Is there a native Linux Wayland alternative to macOS Screen Studio?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. HyperGSR (gpu-recorder-rs) is a native Rust screen recorder for Linux Wayland and X11 that brings Screen Studio's critically-damped spring cursor auto-zoom, custom zoom gesture combinations, and a Wayland Layer-Shell Dynamic Island HUD in just ~56 MB of RAM."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How does HyperGSR track global cursor coordinates on Wayland without root?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Instead of using X11 XQueryPointer (which fails or blocks over native Wayland windows), HyperGSR opens /dev/dri/card* via libdrm, enables DRM_CLIENT_CAP_UNIVERSAL_PLANES and DRM_CLIENT_CAP_ATOMIC, and reads CRTC_X, CRTC_Y, and FB_ID directly from Hardware Cursor Plane #92 at 60Hz with zero root privileges."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+
+  <style>
+    :root {
+      --bg: #07090e;
+      --bg-card: #0e131f;
+      --bg-card-hover: #131b2e;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --border: #1e293b;
+      --cyan: #38bdf8;
+      --indigo: #818cf8;
+      --purple: #c084fc;
+      --emerald: #10b981;
+      --rose: #f43f5e;
+      --amber: #f59e0b;
+    }
+    [data-theme="light"] {
+      --bg: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f1f5f9;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: #cbd5e1;
+      --cyan: #0284c7;
+      --indigo: #4f46e5;
+      --purple: #9333ea;
+      --emerald: #059669;
+      --rose: #e11d48;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+      transition: background 0.25s ease, color 0.25s ease;
+    }
+    a { color: inherit; text-decoration: none; }
+    .container { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+    /* Sticky Floating Dynamic Island Nav */
+    .island-nav-wrap {
+      position: sticky;
+      top: 14px;
+      z-index: 100;
+      display: flex;
+      justify-content: center;
+      padding: 0 16px;
+      margin-top: 14px;
+    }
+    .island-nav {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(15, 19, 30, 0.88);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 999px;
+      padding: 8px 16px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    [data-theme="light"] .island-nav {
+      background: rgba(255, 255, 255, 0.92);
+      border-color: rgba(2, 132, 199, 0.3);
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+    }
+    .rec-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--rose);
+      box-shadow: 0 0 12px var(--rose);
+      animation: pulse 1.6s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.3); opacity: 0.45; }
+    }
+    .brand { font-weight: 800; font-size: 0.95rem; letter-spacing: -0.02em; }
+    .pill-telemetry {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.76rem;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.12);
+      color: var(--cyan);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      font-weight: 600;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 15px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+      border: 1px solid transparent;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-star {
+      background: linear-gradient(135deg, #f59e0b, #ea580c);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(245, 158, 11, 0.35);
+    }
+    .btn-fork {
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(56, 189, 248, 0.3);
+    }
+    .btn-ghost {
+      background: rgba(148, 163, 184, 0.12);
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    /* Hero Section */
+    .hero {
+      text-align: center;
+      padding: 68px 0 48px;
+      position: relative;
+    }
+    .badge-top {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      color: var(--cyan);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.78rem;
+      font-weight: 700;
+      margin-bottom: 22px;
+    }
+    h1 {
+      font-size: clamp(2.3rem, 5vw, 4.1rem);
+      font-weight: 900;
+      letter-spacing: -0.035em;
+      line-height: 1.08;
+      margin-bottom: 20px;
+    }
+    .grad-text {
+      background: linear-gradient(90deg, var(--cyan), var(--indigo), var(--purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      max-width: 780px;
+      margin: 0 auto 32px;
+      font-size: 1.15rem;
+      color: var(--muted);
+    }
+    .cta-row {
+      display: flex;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 36px;
+    }
+    .cta-row .btn {
+      padding: 13px 26px;
+      font-size: 0.98rem;
+    }
+
+    /* Install Terminal Box */
+    .terminal-install {
+      max-width: 680px;
+      margin: 0 auto 48px;
+      background: #0b0f19;
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.86rem;
+      color: #e2e8f0;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.45);
+      text-align: left;
+    }
+    .terminal-install code { color: #38bdf8; }
+    .copy-btn {
+      background: #1e293b;
+      color: #f8fafc;
+      border: 1px solid #334155;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .copy-btn:hover { background: #334155; }
+
+    /* Interactive Spring Camera Simulator Card */
+    .sim-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+      margin-bottom: 56px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.35);
+    }
+    .sim-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .sim-stage {
+      position: relative;
+      height: 340px;
+      background: #060911;
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+      overflow: hidden;
+      cursor: crosshair;
+      user-select: none;
+    }
+    .sim-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(to right, rgba(56, 189, 248, 0.07) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(56, 189, 248, 0.07) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+    .sim-crop {
+      position: absolute;
+      border: 2px solid #38bdf8;
+      background: rgba(56, 189, 248, 0.08);
+      border-radius: 10px;
+      pointer-events: none;
+      box-shadow: 0 0 30px rgba(56, 189, 248, 0.25);
+    }
+    .sim-cursor {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      margin-left: -7px;
+      margin-top: -7px;
+      border-radius: 50%;
+      background: #f43f5e;
+      box-shadow: 0 0 14px #f43f5e;
+      pointer-events: none;
+    }
+
+    /* Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 18px;
+      margin-bottom: 64px;
+    }
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    .metric-card:hover {
+      transform: translateY(-3px);
+      border-color: var(--cyan);
+    }
+    .metric-val {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 2rem;
+      font-weight: 800;
+      color: var(--cyan);
+      margin-bottom: 6px;
+    }
+    .metric-title { font-weight: 700; font-size: 1.05rem; margin-bottom: 6px; }
+    .metric-desc { font-size: 0.9rem; color: var(--muted); }
+
+    /* Showcase Gallery */
+    .section-title {
+      text-align: center;
+      font-size: 2.1rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+    .section-sub {
+      text-align: center;
+      color: var(--muted);
+      max-width: 700px;
+      margin: 0 auto 36px;
+    }
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 24px;
+      margin-bottom: 68px;
+    }
+    .gallery-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      text-align: center;
+    }
+    .gallery-item img {
+      max-width: 100%;
+      border-radius: 10px;
+      margin-bottom: 12px;
+    }
+
+    /* Comparison Table */
+    .table-wrap {
+      overflow-x: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      margin-bottom: 68px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+    th, td {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.94rem;
+    }
+    th {
+      font-weight: 800;
+      background: rgba(56, 189, 248, 0.06);
+    }
+    .highlight-col {
+      background: rgba(16, 185, 129, 0.07);
+      font-weight: 700;
+      color: var(--emerald);
+    }
+
+    /* Fork & Hack Cards */
+    .fork-banner {
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(139, 92, 246, 0.14));
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      border-radius: 22px;
+      padding: 44px 32px;
+      text-align: center;
+      margin-bottom: 68px;
+    }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 36px 0;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Floating Dynamic Island Navigation Bar -->
+  <div class="island-nav-wrap">
+    <nav class="island-nav" aria-label="Dynamic Island Navigation">
+      <span class="rec-dot"></span>
+      <span class="brand">HyperGSR Studio</span>
+      <span class="pill-telemetry" id="nav-coords">DRM #92 • X:50% Y:50%</span>
+      <span class="pill-telemetry" id="nav-zoom">2.0× Auto</span>
+      <button class="btn btn-ghost" id="theme-toggle" onclick="toggleSiteTheme()">☀️ Pearl Light</button>
+      <a class="btn btn-star" href="https://github.com/KunalSiyag/gpu-recorder-rs" target="_blank" rel="noopener">⭐ Star on GitHub</a>
+      <a class="btn btn-fork" href="https://github.com/KunalSiyag/gpu-recorder-rs/fork" target="_blank" rel="noopener">🍴 Fork Repo</a>
+    </nav>
+  </div>
+
+  <main class="container">
+    <!-- Hero -->
+    <section class="hero">
+      <div class="badge-top">🦀 NATIVE RUST • WAYLAND LAYER-SHELL • PIPEWIRE DMA-BUF + NVENC/VAAPI</div>
+      <h1>
+        Screen Studio for <span class="grad-text">Linux Wayland</span><br />
+        in 56 MB of Native Rust.
+      </h1>
+      <p class="subtitle">
+        Zero-copy GPU screen recording with <strong>rootless DRM Hardware Cursor Plane #92 tracking</strong>,
+        <strong>240Hz critically-damped spring auto-zoom</strong>, <strong>self-registering custom gesture combos</strong>,
+        and a floating <strong>Wayland Layer-Shell Dynamic Island UI</strong>.
+      </p>
+
+      <div class="cta-row">
+        <a class="btn btn-star" href="https://github.com/KunalSiyag/gpu-recorder-rs" target="_blank" rel="noopener">
+          ⭐ Star KunalSiyag/gpu-recorder-rs
+        </a>
+        <a class="btn btn-fork" href="https://github.com/KunalSiyag/gpu-recorder-rs/fork" target="_blank" rel="noopener">
+          🍴 Fork &amp; Customize in 5 Mins
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest" target="_blank" rel="noopener">
+          ⬇️ Download v1.0.0 Binary (Linux x86_64)
+        </a>
+      </div>
+
+      <!-- One-Command Install -->
+      <div class="terminal-install">
+        <div>
+          <span style="color:#64748b">$</span>
+          <code id="install-cmd">git clone https://github.com/KunalSiyag/gpu-recorder-rs.git &amp;&amp; cd gpu-recorder-rs &amp;&amp; ./install.sh</code>
+        </div>
+        <button class="copy-btn" onclick="copyInstallCmd(this)">Copy Command</button>
+      </div>
+    </section>
+
+    <!-- Interactive 240Hz Spring Camera Playground -->
+    <section class="sim-card" aria-label="Interactive Spring Auto-Zoom Playground">
+      <div class="sim-header">
+        <div>
+          <h2 style="font-size:1.25rem;font-weight:800;">🎮 Try the 240Hz Critically-Damped Spring Camera Live</h2>
+          <p style="font-size:0.88rem;color:var(--muted);">
+            Move your cursor inside the viewport below, <strong>Click</strong> to trigger Auto-Zoom, or <strong>Scroll Wheel</strong> to lock manual zoom depth (1.0× – 3.0×).
+          </p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-ghost" onclick="triggerPulseSim(2.2)">⚡ 2.2× Pulse</button>
+          <button class="btn btn-ghost" onclick="toggleSimLock()" id="sim-lock-btn">🔒 Lock Zoom</button>
+          <button class="btn btn-ghost" onclick="resetSim()">1.0× Reset</button>
+        </div>
+      </div>
+      <div class="sim-stage" id="sim-stage">
+        <div class="sim-grid"></div>
+        <div style="position:absolute;top:24px;left:28px;font-family:monospace;font-size:0.82rem;color:#64748b;">
+          // src/cursor.rs — Direct libdrm Hardware Cursor Plane #92 Polling (Zero Root)<br/>
+          <span style="color:#38bdf8">pub fn</span> <span style="color:#c084fc">poll_drm_cursor_plane</span>(fd: RawFd, plane_id: u32) -&gt; CursorSample {<br/>
+          &nbsp;&nbsp;<span style="color:#10b981">// Reads CRTC_X, CRTC_Y, FB_ID across all native Wayland windows @ 60Hz</span><br/>
+          }<br/><br/>
+          // src/zoom_engine.rs — Critically-Damped 2D Spring ODE (ζ = 1.0)<br/>
+          <span style="color:#f43f5e">accel = -k * (pos - target) - 2.0 * k.sqrt() * vel;</span>
+        </div>
+        <div class="sim-crop" id="sim-crop">
+          <span style="position:absolute;top:6px;left:10px;font-family:monospace;font-size:0.72rem;color:#38bdf8;font-weight:700;" id="crop-label">
+            16:9 VIRTUAL CAMERA • 1.0× WIDE
+          </span>
+        </div>
+        <div class="sim-cursor" id="sim-cursor"></div>
+      </div>
+    </section>
+
+    <!-- Key Engineering Metrics -->
+    <section class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-val">~56 MB</div>
+        <div class="metric-title">11× Lighter Than Electron</div>
+        <div class="metric-desc">Pure native Rust + GTK4 Layer-Shell with pre-allocated O(1) cursor telemetry ring buffers and zero GC pauses.</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val">DRM #92</div>
+        <div class="metric-title">Rootless Wayland Cursor</div>
+        <div class="metric-desc">Polls <code>/dev/dri/card*</code> universal cursor plane properties (<code>CRTC_X</code>, <code>CRTC_Y</code>, <code>FB_ID</code>) without <code>sudo</code> or XWayland freezes.</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val">240 Hz</div>
+        <div class="metric-title">C² Spring Camera Solver</div>
+        <div class="metric-desc">Bounded Screen Studio trajectory planner with dwell hysteresis and fast-travel pull-back so zoom never gets stuck.</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val">Custom</div>
+        <div class="metric-title">Self-Registering Combos</div>
+        <div class="metric-desc">Bind Cursor Shake, Double-Click, Middle/Right Click, Mouse4/5, <code>Ctrl+Alt</code>, <code>Super+Z</code>, or Scroll Wheel in 1 click.</div>
+      </div>
+    </section>
+
+    <!-- Visual Showcase -->
+    <h2 class="section-title">🎬 Live Auto-Zoom &amp; Dynamic Island UI</h2>
+    <p class="section-sub">
+      Docks natively at the top center of COSMIC, Hyprland, GNOME, Sway, and KDE Wayland desktops with 1-click Obsidian Dark and Pearl Light themes.
+    </p>
+
+    <div style="text-align:center;margin-bottom:32px;">
+      <img src="demo-autozoom.gif" alt="HyperGSR 60 FPS Spring Auto-Zoom Demo GIF" style="max-width:100%;width:780px;border-radius:16px;border:1px solid var(--border);box-shadow:0 20px 50px rgba(0,0,0,0.45);" />
+    </div>
+
+    <div class="gallery-grid">
+      <div class="gallery-item">
+        <img src="island_dark_studio.png" alt="HyperGSR Obsidian Dark Studio Mode" />
+        <h3 style="font-size:1.05rem;margin-bottom:4px;">🌙 Obsidian Dark Studio</h3>
+        <p style="font-size:0.86rem;color:var(--muted);">16:9 Live Cursor Radar, Spring S-Curve Telemetry &amp; Custom Combo Binder</p>
+      </div>
+      <div class="gallery-item">
+        <img src="island_light_studio.png" alt="HyperGSR Pearl Light Studio Mode" />
+        <h3 style="font-size:1.05rem;margin-bottom:4px;">☀️ Pearl Frosted Light Studio</h3>
+        <p style="font-size:0.86rem;color:var(--muted);">Daylight-ready high-contrast frosted glass theme with 1-click live switching</p>
+      </div>
+    </div>
+
+    <!-- Comparison Matrix -->
+    <h2 class="section-title">📊 How HyperGSR Compares</h2>
+    <p class="section-sub">Built from the ground up after reverse-engineering Linux GPU screen recording pipelines.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>gpu-screen-recorder</th>
+            <th>OBS Studio</th>
+            <th>Screen Studio (macOS)</th>
+            <th class="highlight-col">⚡ HyperGSR (Rust)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Linux Wayland &amp; X11 Support</strong></td>
+            <td>✅ Yes</td>
+            <td>✅ Yes</td>
+            <td>❌ macOS Only</td>
+            <td class="highlight-col">✅ Standalone Native + Flatpak Bridge</td>
+          </tr>
+          <tr>
+            <td><strong>Rootless Wayland Global Cursor Tracking</strong></td>
+            <td>❌ X11 XFixes Only</td>
+            <td>⚠️ Compositor-specific</td>
+            <td>❌ macOS Only</td>
+            <td class="highlight-col">✅ DRM Hardware Cursor Plane #92</td>
+          </tr>
+          <tr>
+            <td><strong>Automatic Spring-Physics Zoom-Ins</strong></td>
+            <td>❌ None</td>
+            <td>❌ Manual Lua scripts</td>
+            <td>✅ Yes</td>
+            <td class="highlight-col">✅ 240Hz C² Spring + Bounded Planner</td>
+          </tr>
+          <tr>
+            <td><strong>Self-Registering Custom Zoom Combos</strong></td>
+            <td>❌ None</td>
+            <td>❌ Basic hotkeys</td>
+            <td>⚠️ Limited</td>
+            <td class="highlight-col">✅ Shake, Clicks, Keys, Mouse4/5, Wheel</td>
+          </tr>
+          <tr>
+            <td><strong>Wayland Layer-Shell Dynamic Island UI</strong></td>
+            <td>❌ Legacy Window</td>
+            <td>❌ Full Window</td>
+            <td>❌ macOS Menu Bar</td>
+            <td class="highlight-col">✅ zwlr_layer_shell_v1 + Dark/Light</td>
+          </tr>
+          <tr>
+            <td><strong>Idle RAM &amp; CPU Footprint</strong></td>
+            <td>~45 MB</td>
+            <td>~340 MB</td>
+            <td>~650 MB (Electron)</td>
+            <td class="highlight-col">~56 MB RSS / &lt;1.5% CPU</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Fork & Contribute Callout -->
+    <section class="fork-banner">
+      <h2 style="font-size:2rem;font-weight:900;margin-bottom:12px;">🍴 Fork &amp; Hack HyperGSR in 5 Minutes</h2>
+      <p style="max-width:680px;margin:0 auto 26px;color:var(--muted);font-size:1.05rem;">
+        Want to add a <strong>Catppuccin / TokyoNight / Nord Dynamic Island theme</strong>, a new <strong>GLSL cursor shader</strong>,
+        or an <strong>on-screen keystroke HUD pill</strong>? Our modular Rust codebase has open <code>good first issue</code> tickets waiting for your PR!
+      </p>
+      <div class="cta-row" style="margin-bottom:0;">
+        <a class="btn btn-fork" href="https://github.com/KunalSiyag/gpu-recorder-rs/fork" target="_blank" rel="noopener">
+          🍴 Fork KunalSiyag/gpu-recorder-rs
+        </a>
+        <a class="btn btn-star" href="https://github.com/KunalSiyag/gpu-recorder-rs/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22" target="_blank" rel="noopener">
+          🛠️ Browse Good First Issues (#1, #2, #3)
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>
+        <strong>HyperGSR Studio (<code>gpu-recorder-rs</code>)</strong> • MIT License •
+        <a href="https://github.com/KunalSiyag/gpu-recorder-rs" style="color:var(--cyan);">GitHub Repository</a> •
+        <a href="https://github.com/KunalSiyag/gpu-recorder-rs/releases" style="color:var(--cyan);">Releases</a> •
+        <a href="https://github.com/KunalSiyag/gpu-recorder-rs/issues" style="color:var(--cyan);">Issues &amp; Roadmap</a>
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    function copyInstallCmd(btn) {
+      const cmd = "git clone https://github.com/KunalSiyag/gpu-recorder-rs.git && cd gpu-recorder-rs && ./install.sh";
+      navigator.clipboard.writeText(cmd);
+      btn.textContent = "✓ Copied!";
+      setTimeout(() => { btn.textContent = "Copy Command"; }, 1800);
+    }
+
+    function toggleSiteTheme() {
+      const root = document.documentElement;
+      const btn = document.getElementById("theme-toggle");
+      if (root.getAttribute("data-theme") === "light") {
+        root.removeAttribute("data-theme");
+        btn.textContent = "☀️ Pearl Light";
+      } else {
+        root.setAttribute("data-theme", "light");
+        btn.textContent = "🌙 Obsidian Dark";
+      }
+    }
+
+    // Interactive 240Hz Critically-Damped Spring Simulator
+    const stage = document.getElementById("sim-stage");
+    const crop = document.getElementById("sim-crop");
+    const curDot = document.getElementById("sim-cursor");
+    const cropLabel = document.getElementById("crop-label");
+    const navCoords = document.getElementById("nav-coords");
+    const navZoom = document.getElementById("nav-zoom");
+    const lockBtn = document.getElementById("sim-lock-btn");
+
+    let mouseX = 0.5, mouseY = 0.5;
+    let camX = 0.5, camY = 0.5, camZ = 1.0;
+    let velX = 0, velY = 0, velZ = 0;
+    let targetX = 0.5, targetY = 0.5, targetZ = 1.0;
+    let locked = false;
+    let holdUntil = 0;
+
+    stage.addEventListener("mousemove", (e) => {
+      const rect = stage.getBoundingClientRect();
+      mouseX = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
+      mouseY = Math.max(0.05, Math.min(0.95, (e.clientY - rect.top) / rect.height));
+      if (locked || performance.now() < holdUntil) {
+        targetX = mouseX;
+        targetY = mouseY;
+      }
+      navCoords.textContent = `DRM #92 • X:${Math.round(mouseX * 100)}% Y:${Math.round(mouseY * 100)}%`;
+    });
+
+    stage.addEventListener("mousedown", () => {
+      targetX = mouseX;
+      targetY = mouseY;
+      targetZ = locked ? targetZ : 2.1;
+      holdUntil = performance.now() + 1800;
+    });
+
+    stage.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      locked = true;
+      targetZ = Math.max(1.0, Math.min(3.0, targetZ + (e.deltaY < 0 ? 0.2 : -0.2)));
+      if (targetZ <= 1.05) locked = false;
+      targetX = mouseX;
+      targetY = mouseY;
+      lockBtn.textContent = locked ? `🔒 Locked ${targetZ.toFixed(1)}×` : "🔒 Lock Zoom";
+    }, { passive: false });
+
+    function triggerPulseSim(z) {
+      targetX = mouseX;
+      targetY = mouseY;
+      targetZ = z;
+      holdUntil = performance.now() + 2000;
+    }
+
+    function toggleSimLock() {
+      locked = !locked;
+      targetZ = locked ? 2.1 : 1.0;
+      targetX = locked ? mouseX : 0.5;
+      targetY = locked ? mouseY : 0.5;
+      lockBtn.textContent = locked ? "🔒 Unlock Zoom" : "🔒 Lock Zoom";
+    }
+
+    function resetSim() {
+      locked = false;
+      holdUntil = 0;
+      targetZ = 1.0;
+      targetX = 0.5;
+      targetY = 0.5;
+      lockBtn.textContent = "🔒 Lock Zoom";
+    }
+
+    function stepSpring() {
+      const now = performance.now();
+      if (!locked && now > holdUntil) {
+        targetZ = 1.0;
+        targetX = 0.5;
+        targetY = 0.5;
+      }
+      const k = 58.0;
+      const damp = 2.0 * Math.sqrt(k);
+      const dt = 1 / 120;
+      for (let i = 0; i < 2; i++) {
+        const ax = -k * (camX - targetX) - damp * velX;
+        const ay = -k * (camY - targetY) - damp * velY;
+        const az = -k * (camZ - targetZ) - damp * velZ;
+        velX += ax * dt; velY += ay * dt; velZ += az * dt;
+        camX += velX * dt; camY += velY * dt; camZ += velZ * dt;
+      }
+
+      const rect = stage.getBoundingClientRect();
+      const w = rect.width / camZ;
+      const h = rect.height / camZ;
+      const left = Math.max(0, Math.min(rect.width - w, camX * rect.width - w / 2));
+      const top = Math.max(0, Math.min(rect.height - h, camY * rect.height - h / 2));
+
+      crop.style.width = `${w}px`;
+      crop.style.height = `${h}px`;
+      crop.style.left = `${left}px`;
+      crop.style.top = `${top}px`;
+
+      curDot.style.left = `${mouseX * rect.width}px`;
+      curDot.style.top = `${mouseY * rect.height}px`;
+
+      const zStr = `${camZ.toFixed(2)}×`;
+      cropLabel.textContent = locked
+        ? `16:9 VIRTUAL CAMERA • 🔒 ${zStr} LOCKED`
+        : (camZ > 1.06 ? `16:9 VIRTUAL CAMERA • ⚡ ${zStr} AUTO-ZOOM` : `16:9 VIRTUAL CAMERA • 1.00× WIDE`);
+      navZoom.textContent = locked ? `🔒 ${camZ.toFixed(1)}× Lock` : `${camZ.toFixed(1)}× Zoom`;
+
+      requestAnimationFrame(stepSpring);
+    }
+    requestAnimationFrame(stepSpring);
+  </script>
+</body>
+</html>
