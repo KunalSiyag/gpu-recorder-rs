@@ -133,31 +133,38 @@ impl StudioState {
     pub fn tick(&mut self) {
         let now_ms = self.now_ms();
 
-        let (raw_x, raw_y, left_down, right_down) =
+        let (raw_x, raw_y, sys_inp) =
             if let Some((ix, iy, l, r, ts)) = self.interactive_override {
                 if now_ms.saturating_sub(ts) < 1800 {
-                    (ix, iy, l, r)
+                    (
+                        ix,
+                        iy,
+                        crate::cursor::SystemInputState {
+                            left_down: l,
+                            right_down: r,
+                            ..Default::default()
+                        },
+                    )
                 } else {
                     self.interactive_override = None;
-                    self.poll_live_pointer(now_ms)
+                    self.poll_live_input(now_ms)
                 }
             } else {
-                self.poll_live_pointer(now_ms)
+                self.poll_live_input(now_ms)
             };
 
-        let (sample, clicked_now) = self.cursor_tracker.update(
+        let (sample, clicked_now) = self.cursor_tracker.update_with_input(
             now_ms,
             raw_x,
             raw_y,
-            left_down,
-            right_down,
+            sys_inp,
             &self.cursor_cfg,
         );
 
         if clicked_now {
             self.click_count += 1;
             if self.cursor_cfg.show_keystrokes {
-                let label = if right_down {
+                let label = if sys_inp.right_down {
                     "Right Click · Focus"
                 } else {
                     "Click · Spring Zoom"
@@ -174,6 +181,7 @@ impl StudioState {
         self.last_cursor = sample;
         self.last_viewport = viewport;
 
+        let manual_locked = self.zoom_engine.manual_locked;
         let rec_elapsed = self.recording_elapsed_sec();
         if let Some(ref mut session) = self.encoder_session {
             session.record_zoom_telemetry(
@@ -184,6 +192,7 @@ impl StudioState {
                 sample.smooth_x,
                 sample.smooth_y,
                 clicked_now,
+                manual_locked,
             );
         }
     }
@@ -214,14 +223,14 @@ impl StudioState {
         (comp_fb.width as u32, comp_fb.height as u32, comp_fb.data.clone())
     }
 
-    fn poll_live_pointer(&self, now_ms: u64) -> (f32, f32, bool, bool) {
-        if let Some((px, py, l, r)) = self.cursor_tracker.poll_system_pointer() {
-            return (px, py, l, r);
+    fn poll_live_input(&self, now_ms: u64) -> (f32, f32, crate::cursor::SystemInputState) {
+        if let Some((px, py, inp)) = self.cursor_tracker.poll_system_input() {
+            return (px, py, inp);
         }
         let t = now_ms as f32 / 1000.0;
         let x = 0.5 + 0.25 * (t * 0.6).cos();
         let y = 0.5 + 0.20 * (t * 0.9).sin();
-        (x, y, false, false)
+        (x, y, Default::default())
     }
 
     pub fn start_recording(&mut self) -> Result<PathBuf> {

@@ -18,9 +18,139 @@ impl AutoZoomMode {
     pub fn label(&self) -> &'static str {
         match self {
             AutoZoomMode::ClickToZoom => "Click-to-Zoom (Cinematic)",
-            AutoZoomMode::SmartCursorFollow => "Smart Dwell & Cursor Follow",
+            AutoZoomMode::SmartCursorFollow => "Auto + Combo (Hybrid)",
             AutoZoomMode::TimelineKeyframes => "Timeline Keyframes (Studio)",
-            AutoZoomMode::Manual => "Manual / Hotkey Target",
+            AutoZoomMode::Manual => "Combo Only (Manual Liberty)",
+        }
+    }
+}
+
+/// User-selectable or self-registered combination (mouse operation, modifier+click, gesture, or key)
+/// that triggers or toggles zoom on demand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZoomComboBinding {
+    /// Default: Quick Cursor Shake (⇄ wiggle) OR Middle-Click (Mouse 2) — works across all Wayland & X11 windows!
+    ShakeOrMiddleClick,
+    /// Middle Mouse Button (Wheel Click / Mouse 2)
+    MiddleClick,
+    /// Ctrl + Click (Left or Right Click while holding Ctrl)
+    CtrlClick,
+    /// Right Mouse Button (Mouse 3)
+    RightClick,
+    /// Double Left-Click (< 320ms)
+    DoubleClick,
+    /// Side Mouse Button (Mouse 4 / Mouse 5)
+    SideButton,
+    /// Quick Cursor Shake (wiggle mouse left-right twice anywhere on screen)
+    CursorShake,
+    /// Custom user-registered combo recorded via "🎯 Record Combo…" in the UI
+    Custom {
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        super_key: bool,
+        /// 0 = none, 1 = left, 2 = middle, 3 = right, 4 = side
+        mouse_button: u8,
+        /// X11 keycode (0 = none)
+        keycode: u32,
+        shake: bool,
+        label: String,
+    },
+}
+
+impl Default for ZoomComboBinding {
+    fn default() -> Self {
+        ZoomComboBinding::ShakeOrMiddleClick
+    }
+}
+
+impl ZoomComboBinding {
+    pub fn short_label(&self) -> String {
+        match self {
+            ZoomComboBinding::ShakeOrMiddleClick => "⇄ Shake / Mid-Click".to_string(),
+            ZoomComboBinding::MiddleClick => "🖱️ Middle Click".to_string(),
+            ZoomComboBinding::CtrlClick => "⌃ Ctrl + Click".to_string(),
+            ZoomComboBinding::RightClick => "🖱️ Right Click".to_string(),
+            ZoomComboBinding::DoubleClick => "🖱️ Double Click".to_string(),
+            ZoomComboBinding::SideButton => "🖱️ Side Button".to_string(),
+            ZoomComboBinding::CursorShake => "⇄ Shake Cursor".to_string(),
+            ZoomComboBinding::Custom { label, .. } => format!("🎯 {label}"),
+        }
+    }
+
+    pub fn is_active(&self, c: &CursorSample) -> bool {
+        match self {
+            ZoomComboBinding::ShakeOrMiddleClick => c.shake_gesture || c.middle_down,
+            ZoomComboBinding::MiddleClick => c.middle_down,
+            ZoomComboBinding::CtrlClick => c.ctrl_down && (c.left_down || c.right_down),
+            ZoomComboBinding::RightClick => c.right_down,
+            ZoomComboBinding::DoubleClick => c.double_clicked,
+            ZoomComboBinding::SideButton => c.side_down,
+            ZoomComboBinding::CursorShake => c.shake_gesture,
+            ZoomComboBinding::Custom {
+                ctrl,
+                alt,
+                shift,
+                super_key,
+                mouse_button,
+                keycode,
+                shake,
+                ..
+            } => {
+                if *shake {
+                    return c.shake_gesture;
+                }
+                let mods_ok = (!*ctrl || c.ctrl_down)
+                    && (!*alt || c.alt_down)
+                    && (!*shift || c.shift_down)
+                    && (!*super_key || c.super_down);
+                if !mods_ok {
+                    return false;
+                }
+                let btn_ok = match *mouse_button {
+                    0 => true,
+                    1 => c.left_down,
+                    2 => c.middle_down,
+                    3 => c.right_down,
+                    4 => c.side_down,
+                    _ => false,
+                };
+                let key_ok = *keycode == 0 || c.active_keycode == *keycode;
+                let has_any = *ctrl
+                    || *alt
+                    || *shift
+                    || *super_key
+                    || *mouse_button != 0
+                    || *keycode != 0;
+                has_any && btn_ok && key_ok
+            }
+        }
+    }
+}
+
+/// How the zoom combo behaves when triggered by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComboActionMode {
+    /// Trigger once to lock zoom IN (follows cursor smoothly as long as you want); trigger again to return to 1.0x
+    ToggleLock,
+    /// Stay zoomed in while holding the combo; smoothly return to 1.0x on release
+    HoldToZoom,
+    /// Step through zoom depths on each trigger: 1.0x -> 1.8x -> 2.5x -> 1.0x
+    StepCycle,
+}
+
+impl Default for ComboActionMode {
+    fn default() -> Self {
+        ComboActionMode::ToggleLock
+    }
+}
+
+impl ComboActionMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ComboActionMode::ToggleLock => "⇄ Toggle Lock",
+            ComboActionMode::HoldToZoom => "✋ Hold to Zoom",
+            ComboActionMode::StepCycle => "🪜 Step 1.8×/2.5×",
         }
     }
 }
@@ -50,6 +180,12 @@ pub struct ZoomConfig {
     pub deadzone_radius: f32,
     /// Directional motion blur strength during fast camera zoom/pan transitions
     pub motion_blur_strength: f32,
+    /// User-configurable mouse/key/gesture combination for manual zoom control
+    #[serde(default)]
+    pub combo_binding: ZoomComboBinding,
+    /// Whether the combo toggles zoom lock, holds while pressed, or steps through zoom levels
+    #[serde(default)]
+    pub combo_action: ComboActionMode,
 }
 
 impl Default for ZoomConfig {
@@ -62,6 +198,8 @@ impl Default for ZoomConfig {
             hold_duration_ms: 1650,
             deadzone_radius: 0.065,
             motion_blur_strength: 0.35,
+            combo_binding: ZoomComboBinding::ShakeOrMiddleClick,
+            combo_action: ComboActionMode::ToggleLock,
         }
     }
 }
@@ -118,6 +256,12 @@ pub struct ZoomEngine {
     last_step_ms: u64,
     next_keyframe_id: u64,
     pub keyframes: Vec<ZoomKeyframe>,
+    /// True when the user has manually engaged zoom via their combo, scroll wheel, or lock toggle.
+    /// While true, the camera stays zoomed in and follows the cursor indefinitely until unlocked!
+    pub manual_locked: bool,
+    pub manual_zoom_level: f32,
+    prev_combo_active: bool,
+    hold_impulse_until_ms: u64,
 }
 
 impl ZoomEngine {
@@ -140,6 +284,10 @@ impl ZoomEngine {
             last_step_ms: 0,
             next_keyframe_id: 4,
             keyframes: Vec::new(),
+            manual_locked: false,
+            manual_zoom_level: 2.0,
+            prev_combo_active: false,
+            hold_impulse_until_ms: 0,
         };
         engine.seed_default_keyframes();
         engine
@@ -212,13 +360,62 @@ impl ZoomEngine {
         self.active_until_ms = now_ms + hold_ms;
         self.last_trigger_x = self.target_x;
         self.last_trigger_y = self.target_y;
+        if zoom <= 1.01 {
+            self.manual_locked = false;
+        }
+    }
+
+    /// Directly toggle manual zoom lock IN / OUT at the current cursor position.
+    pub fn toggle_manual_lock(&mut self, x: f32, y: f32, default_zoom: f32) {
+        self.manual_locked = !self.manual_locked;
+        if self.manual_locked {
+            self.manual_zoom_level = default_zoom.clamp(1.25, 3.5);
+            self.target_x = x.clamp(0.0, 1.0);
+            self.target_y = y.clamp(0.0, 1.0);
+            self.target_zoom = self.manual_zoom_level;
+        } else {
+            self.target_x = 0.5;
+            self.target_y = 0.5;
+            self.target_zoom = 1.0;
+            self.active_until_ms = 0;
+        }
+    }
+
+    /// Adjust zoom depth via mouse scroll wheel (`delta_zoom > 0` zooms in, `< 0` zooms out).
+    pub fn adjust_manual_zoom_wheel(&mut self, x: f32, y: f32, delta_zoom: f32) {
+        let base = if self.manual_locked {
+            self.manual_zoom_level
+        } else {
+            self.cam_zoom.max(1.0)
+        };
+        let next = (base + delta_zoom).clamp(1.0, 3.2);
+        if next <= 1.05 {
+            self.manual_locked = false;
+            self.manual_zoom_level = 1.0;
+            self.target_zoom = 1.0;
+            self.target_x = 0.5;
+            self.target_y = 0.5;
+            self.active_until_ms = 0;
+        } else {
+            self.manual_locked = true;
+            self.manual_zoom_level = next;
+            self.target_zoom = next;
+            self.target_x = x.clamp(0.0, 1.0);
+            self.target_y = y.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn release_manual_lock(&mut self) {
+        self.manual_locked = false;
+        self.target_zoom = 1.0;
+        self.target_x = 0.5;
+        self.target_y = 0.5;
+        self.active_until_ms = 0;
     }
 
     /// Step the spring-damper virtual camera in O(1) time.
-    /// Follows Screen Studio's bounded-segment model:
-    /// - Zooms in ONLY on intentional events (clicks/cursor-shape changes or a fresh glide-and-settle to a new UI area)
-    /// - Holds for `hold_duration_ms` (~1.65s), panning smoothly only if cursor leaves the deadzone
-    /// - Automatically returns to `1.0x` wide view after hold expires or when moving fast across the screen
+    /// Supports both user-triggered Manual Combo Zoom (with full duration & depth liberty)
+    /// and Screen Studio's bounded-segment Auto-Zoom.
     pub fn step(
         &mut self,
         now_ms: u64,
@@ -234,6 +431,69 @@ impl ZoomEngine {
         };
         self.last_step_ms = now_ms;
 
+        // 1. Evaluate user's Manual Zoom Combo (Mouse button / Modifier+Click / Shake Gesture / Custom Key)
+        let combo_now = cfg.combo_binding.is_active(&cursor);
+        let combo_rising = combo_now && !self.prev_combo_active;
+        self.prev_combo_active = combo_now;
+
+        match cfg.combo_action {
+            ComboActionMode::ToggleLock => {
+                if combo_rising {
+                    self.manual_locked = !self.manual_locked;
+                    if self.manual_locked {
+                        self.manual_zoom_level = cfg.target_zoom.clamp(1.25, 3.5);
+                        self.target_x = cursor.smooth_x;
+                        self.target_y = cursor.smooth_y;
+                        self.target_zoom = self.manual_zoom_level;
+                    } else {
+                        self.target_x = 0.5;
+                        self.target_y = 0.5;
+                        self.target_zoom = 1.0;
+                        self.active_until_ms = 0;
+                    }
+                }
+            }
+            ComboActionMode::HoldToZoom => {
+                if combo_now {
+                    // If triggered by an impulse gesture (shake or double-click), hold for 2.2s
+                    if cursor.shake_gesture || cursor.double_clicked {
+                        self.hold_impulse_until_ms = now_ms + 2200;
+                    }
+                    self.manual_locked = true;
+                    self.manual_zoom_level = cfg.target_zoom.clamp(1.25, 3.5);
+                    if combo_rising {
+                        self.target_x = cursor.smooth_x;
+                        self.target_y = cursor.smooth_y;
+                    }
+                } else if now_ms >= self.hold_impulse_until_ms && self.manual_locked {
+                    self.manual_locked = false;
+                    self.target_x = 0.5;
+                    self.target_y = 0.5;
+                    self.target_zoom = 1.0;
+                }
+            }
+            ComboActionMode::StepCycle => {
+                if combo_rising {
+                    if !self.manual_locked {
+                        self.manual_locked = true;
+                        self.manual_zoom_level = 1.80;
+                        self.target_x = cursor.smooth_x;
+                        self.target_y = cursor.smooth_y;
+                    } else if self.manual_zoom_level < 2.2 {
+                        self.manual_zoom_level = 2.50;
+                        self.target_x = cursor.smooth_x;
+                        self.target_y = cursor.smooth_y;
+                    } else {
+                        self.manual_locked = false;
+                        self.target_x = 0.5;
+                        self.target_y = 0.5;
+                        self.target_zoom = 1.0;
+                        self.active_until_ms = 0;
+                    }
+                }
+            }
+        }
+
         // Track if cursor has traveled far enough from the last trigger point to arm a new settle-zoom
         let dist_from_trigger = ((cursor.smooth_x - self.last_trigger_x).powi(2)
             + (cursor.smooth_y - self.last_trigger_y).powi(2))
@@ -242,7 +502,18 @@ impl ZoomEngine {
             self.armed_after_travel = true;
         }
 
-        if !cfg.enabled {
+        if self.manual_locked {
+            // Manual Combo Lock is active: user has 100% liberty to stay zoomed in for as long as they want!
+            self.target_zoom = self.manual_zoom_level.clamp(1.2, 3.5);
+            let dx = cursor.smooth_x - self.target_x;
+            let dy = cursor.smooth_y - self.target_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > cfg.deadzone_radius * 0.75 {
+                let pull = (dist - cfg.deadzone_radius * 0.75) / dist;
+                self.target_x += dx * pull * 0.35;
+                self.target_y += dy * pull * 0.35;
+            }
+        } else if !cfg.enabled {
             self.target_x = 0.5;
             self.target_y = 0.5;
             self.target_zoom = 1.0;

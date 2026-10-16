@@ -23,6 +23,37 @@ pub struct CursorSample {
     pub speed: f32,
     pub left_down: bool,
     pub right_down: bool,
+    #[serde(default)]
+    pub middle_down: bool,
+    #[serde(default)]
+    pub side_down: bool,
+    #[serde(default)]
+    pub ctrl_down: bool,
+    #[serde(default)]
+    pub alt_down: bool,
+    #[serde(default)]
+    pub shift_down: bool,
+    #[serde(default)]
+    pub super_down: bool,
+    #[serde(default)]
+    pub active_keycode: u32,
+    #[serde(default)]
+    pub double_clicked: bool,
+    #[serde(default)]
+    pub shake_gesture: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemInputState {
+    pub left_down: bool,
+    pub middle_down: bool,
+    pub right_down: bool,
+    pub side_down: bool,
+    pub ctrl_down: bool,
+    pub alt_down: bool,
+    pub shift_down: bool,
+    pub super_down: bool,
+    pub active_keycode: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -299,6 +330,11 @@ pub struct CursorTracker {
     vel_y: f32,
     prev_left_down: bool,
     prev_right_down: bool,
+    last_left_click_ms: u64,
+    last_shake_ms: u64,
+    shake_reversals: Vec<(u64, f32)>,
+    prev_dx_sign: i8,
+    extreme_x: f32,
     ripples: Vec<ClickRipple>,
     keystrokes: Vec<KeystrokeOverlay>,
     /// Dwell tracking for smart auto-zoom when user focuses in a small region
@@ -341,7 +377,7 @@ impl X11CursorConn {
         }
     }
 
-    fn query_pointer(&self) -> Option<(f32, f32, bool, bool)> {
+    fn query_pointer_and_keys(&self) -> Option<(f32, f32, SystemInputState)> {
         unsafe {
             let mut root_ret = 0;
             let mut child_ret = 0;
@@ -366,9 +402,46 @@ impl X11CursorConn {
             }
             let nx = (root_x as f32 / self.screen_w).clamp(0.0, 1.0);
             let ny = (root_y as f32 / self.screen_h).clamp(0.0, 1.0);
-            let left = (mask & (1 << 8)) != 0;
-            let right = (mask & (1 << 10)) != 0;
-            Some((nx, ny, left, right))
+
+            let mut keymap: [c_char; 32] = [0; 32];
+            (self.xlib.XQueryKeymap)(self.display, keymap.as_mut_ptr());
+
+            let is_key_down = |kc: usize| -> bool {
+                let byte_idx = kc / 8;
+                let bit_idx = kc % 8;
+                byte_idx < 32 && ((keymap[byte_idx] as u8) & (1 << bit_idx)) != 0
+            };
+
+            // Standard X11/evdev modifier keycodes: Shift(50,62), Ctrl(37,105), Alt(64,108), Super(133,134)
+            let shift_kc = is_key_down(50) || is_key_down(62);
+            let ctrl_kc = is_key_down(37) || is_key_down(105);
+            let alt_kc = is_key_down(64) || is_key_down(108);
+            let super_kc = is_key_down(133) || is_key_down(134);
+
+            let mut active_keycode = 0u32;
+            for kc in 9..255usize {
+                if matches!(kc, 37 | 50 | 62 | 64 | 105 | 108 | 133 | 134) {
+                    continue;
+                }
+                if is_key_down(kc) {
+                    active_keycode = kc as u32;
+                    break;
+                }
+            }
+
+            let state = SystemInputState {
+                left_down: (mask & (1 << 8)) != 0,
+                middle_down: (mask & (1 << 9)) != 0,
+                right_down: (mask & (1 << 10)) != 0,
+                side_down: (mask & ((1 << 11) | (1 << 12))) != 0,
+                shift_down: ((mask & (1 << 0)) != 0) || shift_kc,
+                ctrl_down: ((mask & (1 << 2)) != 0) || ctrl_kc,
+                alt_down: ((mask & (1 << 3)) != 0) || alt_kc,
+                super_down: ((mask & (1 << 6)) != 0) || super_kc,
+                active_keycode,
+            };
+
+            Some((nx, ny, state))
         }
     }
 }
@@ -393,6 +466,11 @@ impl CursorTracker {
             vel_y: 0.0,
             prev_left_down: false,
             prev_right_down: false,
+            last_left_click_ms: 0,
+            last_shake_ms: 0,
+            shake_reversals: Vec::with_capacity(8),
+            prev_dx_sign: 0,
+            extreme_x: 0.5,
             ripples: Vec::with_capacity(CLICK_RIPPLE_CAP),
             keystrokes: Vec::with_capacity(KEYSTROKE_HUD_CAP),
             dwell_anchor: (0.5, 0.5),
@@ -404,23 +482,66 @@ impl CursorTracker {
     }
 
     /// Queries the live hardware cursor plane on `/dev/dri/card1` first (works across all
-    /// native Wayland and XWayland windows on COSMIC), falling back to X11 `XQueryPointer`.
-    pub fn poll_system_pointer(&self) -> Option<(f32, f32, bool, bool)> {
-        let x11_buttons = self
-            .x11_conn
-            .as_ref()
-            .and_then(|x| x.query_pointer())
-            .map(|(_, _, l, r)| (l, r))
-            .unwrap_or((false, false));
+    /// native Wayland and XWayland windows on COSMIC), combined with X11 button/modifier/keymap state.
+    pub fn poll_system_input(&self) -> Option<(f32, f32, SystemInputState)> {
+        let x11_snap = self.x11_conn.as_ref().and_then(|x| x.query_pointer_and_keys());
+        let mut input = x11_snap.map(|(_, _, s)| s).unwrap_or_default();
 
         if let Some(ref drm) = self.drm_cursor {
             if let Some((nx, ny, shape_changed)) = drm.query_cursor() {
-                // Treat cursor bitmap change (e.g. pointer hand / I-beam / active click feedback)
-                // or X11 button mask as an interaction trigger.
-                return Some((nx, ny, x11_buttons.0 || shape_changed, x11_buttons.1));
+                if shape_changed {
+                    input.left_down = true;
+                }
+                return Some((nx, ny, input));
             }
         }
-        self.x11_conn.as_ref()?.query_pointer()
+        x11_snap
+    }
+
+    pub fn poll_system_pointer(&self) -> Option<(f32, f32, bool, bool)> {
+        let (nx, ny, inp) = self.poll_system_input()?;
+        Some((nx, ny, inp.left_down, inp.right_down))
+    }
+
+    /// Detects an intentional quick horizontal cursor shake (wiggle left-right-left-right
+    /// within 380ms) directly from DRM hardware cursor plane coordinates.
+    /// Works 100% globally across all native Wayland & X11 windows without root!
+    fn detect_cursor_shake(&mut self, now_ms: u64, raw_x: f32, prev_raw_x: f32) -> bool {
+        let dx = raw_x - prev_raw_x;
+        if dx.abs() < 0.004 {
+            return false;
+        }
+        let sign: i8 = if dx > 0.0 { 1 } else { -1 };
+        if self.prev_dx_sign == 0 {
+            self.prev_dx_sign = sign;
+            self.extreme_x = raw_x;
+            return false;
+        }
+
+        if sign == self.prev_dx_sign {
+            if (sign > 0 && raw_x > self.extreme_x) || (sign < 0 && raw_x < self.extreme_x) {
+                self.extreme_x = raw_x;
+            }
+            return false;
+        }
+
+        // Direction reversed! Check swing amplitude since last reversal extreme
+        let swing = (raw_x - self.extreme_x).abs();
+        self.prev_dx_sign = sign;
+        self.extreme_x = raw_x;
+
+        if (0.015..=0.24).contains(&swing) {
+            self.shake_reversals.push((now_ms, swing));
+        }
+        self.shake_reversals
+            .retain(|(t, _)| now_ms.saturating_sub(*t) <= 420);
+
+        if self.shake_reversals.len() >= 3 && now_ms.saturating_sub(self.last_shake_ms) > 850 {
+            self.shake_reversals.clear();
+            self.last_shake_ms = now_ms;
+            return true;
+        }
+        false
     }
 
     /// Push a new cursor observation and step the critically-damped 2D spring filter in O(1) time.
@@ -433,15 +554,29 @@ impl CursorTracker {
         right_down: bool,
         cfg: &CursorConfig,
     ) -> (CursorSample, bool) {
+        let inp = SystemInputState {
+            left_down,
+            right_down,
+            ..Default::default()
+        };
+        self.update_with_input(timestamp_ms, raw_x, raw_y, inp, cfg)
+    }
+
+    pub fn update_with_input(
+        &mut self,
+        timestamp_ms: u64,
+        raw_x: f32,
+        raw_y: f32,
+        inp: SystemInputState,
+        cfg: &CursorConfig,
+    ) -> (CursorSample, bool) {
         let prev = self.latest().unwrap_or(CursorSample {
             timestamp_ms,
             raw_x,
             raw_y,
             smooth_x: raw_x,
             smooth_y: raw_y,
-            speed: 0.0,
-            left_down: false,
-            right_down: false,
+            ..Default::default()
         });
 
         let dt =
@@ -451,6 +586,8 @@ impl CursorTracker {
         if raw_delta > 0.0015 {
             self.last_motion_ms = timestamp_ms;
         }
+
+        let shake_gesture = self.detect_cursor_shake(timestamp_ms, raw_x, prev.raw_x);
 
         let (smooth_x, smooth_y) = if cfg.smoothing_enabled {
             let k = cfg.smoothing_stiffness.clamp(20.0, 600.0);
@@ -471,8 +608,20 @@ impl CursorTracker {
 
         let speed = (self.vel_x * self.vel_x + self.vel_y * self.vel_y).sqrt();
 
-        let clicked_now =
-            (left_down && !self.prev_left_down) || (right_down && !self.prev_right_down);
+        let left_rising = inp.left_down && !self.prev_left_down;
+        let right_rising = inp.right_down && !self.prev_right_down;
+        let clicked_now = left_rising || right_rising;
+
+        let mut double_clicked = false;
+        if left_rising {
+            if self.last_left_click_ms > 0
+                && timestamp_ms.saturating_sub(self.last_left_click_ms) <= 320
+            {
+                double_clicked = true;
+            }
+            self.last_left_click_ms = timestamp_ms;
+        }
+
         if clicked_now {
             self.last_motion_ms = timestamp_ms;
             if self.ripples.len() >= CLICK_RIPPLE_CAP {
@@ -482,11 +631,11 @@ impl CursorTracker {
                 x: smooth_x,
                 y: smooth_y,
                 start_ms: timestamp_ms,
-                is_right_click: right_down && !left_down,
+                is_right_click: inp.right_down && !inp.left_down,
             });
         }
-        self.prev_left_down = left_down;
-        self.prev_right_down = right_down;
+        self.prev_left_down = inp.left_down;
+        self.prev_right_down = inp.right_down;
 
         self.ripples
             .retain(|r| timestamp_ms.saturating_sub(r.start_ms) < 650);
@@ -508,8 +657,17 @@ impl CursorTracker {
             smooth_x,
             smooth_y,
             speed,
-            left_down,
-            right_down,
+            left_down: inp.left_down,
+            right_down: inp.right_down,
+            middle_down: inp.middle_down,
+            side_down: inp.side_down,
+            ctrl_down: inp.ctrl_down,
+            alt_down: inp.alt_down,
+            shift_down: inp.shift_down,
+            super_down: inp.super_down,
+            active_keycode: inp.active_keycode,
+            double_clicked,
+            shake_gesture,
         };
 
         self.samples[self.head] = sample;

@@ -1,12 +1,13 @@
 use crate::encoder::apply_hardware_autozoom_pass;
 use crate::state::SharedStudioState;
-use crate::zoom_engine::AutoZoomMode;
+use crate::zoom_engine::{AutoZoomMode, ComboActionMode, ZoomComboBinding};
 use glib::object::ObjectType;
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, DrawingArea,
-    EventControllerMotion, GestureClick, Image, Label, Orientation,
+    EventControllerKey, EventControllerMotion, EventControllerScroll, EventControllerScrollFlags,
+    GestureClick, Image, Label, Orientation,
 };
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CString};
@@ -582,11 +583,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     brand_box.append(&wave_indicator);
     brand_box.append(&status_lbl);
 
-    // 2. Fixed-Width Live Auto-Zoom Pill (No variable-length pixel coords in top bar!)
+    // 2. Fixed-Width Live Auto-Zoom Pill (Click: Toggle Manual Lock | Scroll: Dial Zoom | Right-Click: Reset 1.0x)
     let zoom_pill_btn = Button::new();
     zoom_pill_btn.add_css_class("lens-pill");
     zoom_pill_btn.set_tooltip_text(Some(
-        "Screen Studio Auto-Zoom Lens (Click to pulse a 2.0× smooth zoom)",
+        "Click: Toggle Manual Zoom Lock · Scroll Wheel: Dial Zoom (1.0×–3.2×) · Right-Click: Reset 1.0×",
     ));
     let zoom_pill_box = GtkBox::new(Orientation::Horizontal, 4);
     let zoom_icon = Image::from_file(asset_path("icon-autozoom.svg"));
@@ -854,13 +855,24 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     vis_card.append(&radar_area);
 
     let vis_btn_row = GtkBox::new(Orientation::Horizontal, 6);
-    let test_zoom_btn = Button::with_label("⚡ Pulse 2.0× Zoom");
+    let test_zoom_btn = Button::with_label("🔒 Lock / Unlock Zoom");
     test_zoom_btn.add_css_class("action-chip");
     test_zoom_btn.set_hexpand(true);
+    let pulse_zoom_btn = Button::with_label("⚡ 1.7s Pulse");
     let reset_zoom_btn = Button::with_label("1.0× Wide");
     {
         let st = state.clone();
         test_zoom_btn.connect_clicked(move |_| {
+            let mut g = st.lock();
+            let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
+            let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
+            let target_z = g.zoom_cfg.target_zoom;
+            g.zoom_engine.toggle_manual_lock(cx, cy, target_z);
+        });
+    }
+    {
+        let st = state.clone();
+        pulse_zoom_btn.connect_clicked(move |_| {
             let mut g = st.lock();
             let now = g.now_ms();
             let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
@@ -876,25 +888,46 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let st = state.clone();
         zoom_pill_btn.connect_clicked(move |_| {
             let mut g = st.lock();
-            let now = g.now_ms();
             let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
             let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
             let target_z = g.zoom_cfg.target_zoom;
-            let cur_cfg = g.cursor_cfg.clone();
-            g.cursor_tracker.update(now, cx, cy, true, false, &cur_cfg);
-            g.zoom_engine
-                .trigger_manual_zoom(cx, cy, target_z, now, 1650);
+            g.zoom_engine.toggle_manual_lock(cx, cy, target_z);
         });
+    }
+    // Right-click on Top-Bar Zoom Pill -> Reset immediately to 1.0x Wide
+    {
+        let st = state.clone();
+        let pill_rclick = GestureClick::new();
+        pill_rclick.set_button(3);
+        pill_rclick.connect_pressed(move |_, _, _, _| {
+            let mut g = st.lock();
+            g.zoom_engine.release_manual_lock();
+        });
+        zoom_pill_btn.add_controller(pill_rclick);
+    }
+    // Mouse Scroll Wheel on Top-Bar Zoom Pill -> Smoothly dial manual zoom (1.0x .. 3.2x)
+    {
+        let st = state.clone();
+        let scroll_ctrl = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        scroll_ctrl.connect_scroll(move |_, _dx, dy| {
+            let mut g = st.lock();
+            let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
+            let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
+            let step = if dy < 0.0 { 0.20 } else { -0.20 };
+            g.zoom_engine.adjust_manual_zoom_wheel(cx, cy, step);
+            glib::Propagation::Stop
+        });
+        zoom_pill_btn.add_controller(scroll_ctrl);
     }
     {
         let st = state.clone();
         reset_zoom_btn.connect_clicked(move |_| {
             let mut g = st.lock();
-            let now = g.now_ms();
-            g.zoom_engine.trigger_manual_zoom(0.5, 0.5, 1.0, now, 300);
+            g.zoom_engine.release_manual_lock();
         });
     }
     vis_btn_row.append(&test_zoom_btn);
+    vis_btn_row.append(&pulse_zoom_btn);
     vis_btn_row.append(&reset_zoom_btn);
     vis_card.append(&vis_btn_row);
 
@@ -933,13 +966,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
     let mode_track = GtkBox::new(Orientation::Horizontal, 3);
     mode_track.add_css_class("seg-track");
-    let m_follow = Button::with_label("Smart Follow");
-    let m_click = Button::with_label("Click Lock");
-    let m_tour = Button::with_label("Cinema Tour");
-    for b in [&m_follow, &m_click, &m_tour] {
+    let m_follow = Button::with_label("Auto + Combo");
+    let m_combo_only = Button::with_label("Combo Only");
+    let m_click = Button::with_label("Click Zoom");
+    for b in [&m_follow, &m_combo_only, &m_click] {
         b.set_hexpand(true);
     }
-    let mode_btns = vec![m_follow.clone(), m_click.clone(), m_tour.clone()];
+    let mode_btns = vec![m_follow.clone(), m_combo_only.clone(), m_click.clone()];
     set_active_segment(&mode_btns, 0);
     {
         let st = state.clone();
@@ -952,23 +985,302 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     {
         let st = state.clone();
         let btns = mode_btns.clone();
-        m_click.connect_clicked(move |_| {
-            st.lock().zoom_cfg.mode = AutoZoomMode::ClickToZoom;
+        m_combo_only.connect_clicked(move |_| {
+            st.lock().zoom_cfg.mode = AutoZoomMode::Manual;
             set_active_segment(&btns, 1);
         });
     }
     {
         let st = state.clone();
         let btns = mode_btns.clone();
-        m_tour.connect_clicked(move |_| {
-            st.lock().zoom_cfg.mode = AutoZoomMode::TimelineKeyframes;
+        m_click.connect_clicked(move |_| {
+            st.lock().zoom_cfg.mode = AutoZoomMode::ClickToZoom;
             set_active_segment(&btns, 2);
         });
     }
     mode_track.append(&m_follow);
+    mode_track.append(&m_combo_only);
     mode_track.append(&m_click);
-    mode_track.append(&m_tour);
     ctrl_card.append(&mode_track);
+
+    // -------------------------------------------------------------------------
+    // MANUAL ZOOM COMBO & LIVE SELF-REGISTRATION ("Record Combo…")
+    // -------------------------------------------------------------------------
+    let combo_cap = Label::new(Some("MANUAL ZOOM COMBO (MOUSE / KEY / SHAKE)"));
+    combo_cap.add_css_class("section-cap");
+    combo_cap.set_halign(Align::Start);
+    ctrl_card.append(&combo_cap);
+
+    let combo_track = GtkBox::new(Orientation::Horizontal, 3);
+    combo_track.add_css_class("seg-track");
+    let c_shake_mid = Button::with_label("⇄ Shake/Mid");
+    let c_mid = Button::with_label("🖱️ Mid-Click");
+    let c_ctrl = Button::with_label("⌃ Ctrl+Click");
+    let c_dbl = Button::with_label("🖱️ Dbl-Click");
+    for b in [&c_shake_mid, &c_mid, &c_ctrl, &c_dbl] {
+        b.set_hexpand(true);
+    }
+    let combo_preset_btns = vec![
+        c_shake_mid.clone(),
+        c_mid.clone(),
+        c_ctrl.clone(),
+        c_dbl.clone(),
+    ];
+    set_active_segment(&combo_preset_btns, 0);
+
+    let record_combo_btn = Button::with_label("🎯 Record Combo…");
+    record_combo_btn.set_hexpand(true);
+    record_combo_btn.set_tooltip_text(Some(
+        "Click, then perform ANY mouse click (Middle/Right/Side/Ctrl+Click), key press, or cursor shake to bind!",
+    ));
+
+    let combo_action_btn = Button::with_label("⇄ Toggle Lock");
+    combo_action_btn.set_tooltip_text(Some(
+        "Switch how your combo behaves: Toggle Lock (stay zoomed as long as you want), Hold to Zoom, or Step 1.8×/2.5×",
+    ));
+
+    let learning_combo = Arc::new(AtomicBool::new(false));
+
+    for (idx, (btn, binding)) in [
+        (c_shake_mid.clone(), ZoomComboBinding::ShakeOrMiddleClick),
+        (c_mid.clone(), ZoomComboBinding::MiddleClick),
+        (c_ctrl.clone(), ZoomComboBinding::CtrlClick),
+        (c_dbl.clone(), ZoomComboBinding::DoubleClick),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let st = state.clone();
+        let btns = combo_preset_btns.clone();
+        let rec_b = record_combo_btn.clone();
+        let learn_flag = learning_combo.clone();
+        btn.connect_clicked(move |_| {
+            learn_flag.store(false, Ordering::Relaxed);
+            st.lock().zoom_cfg.combo_binding = binding.clone();
+            set_active_segment(&btns, idx);
+            rec_b.set_label("🎯 Record Combo…");
+            rec_b.remove_css_class("action-chip");
+        });
+    }
+
+    {
+        let learn_flag = learning_combo.clone();
+        let st = state.clone();
+        record_combo_btn.connect_clicked(move |btn| {
+            let now_learning = !learn_flag.load(Ordering::Relaxed);
+            learn_flag.store(now_learning, Ordering::Relaxed);
+            if now_learning {
+                btn.set_label("● Press Key, Click, or Shake…");
+                btn.add_css_class("action-chip");
+            } else {
+                let lbl = st.lock().zoom_cfg.combo_binding.short_label();
+                btn.set_label(&lbl);
+            }
+        });
+    }
+
+    // Allow right-click / middle-click / side-click / modifier+click directly on "Record Combo…" to bind!
+    {
+        let learn_flag = learning_combo.clone();
+        let st = state.clone();
+        let btns = combo_preset_btns.clone();
+        let rec_b = record_combo_btn.clone();
+        let bind_click = GestureClick::new();
+        bind_click.set_button(0);
+        bind_click.connect_pressed(move |gesture, n_press, _, _| {
+            if !learn_flag.load(Ordering::Relaxed) {
+                return;
+            }
+            let btn_num = gesture.current_button();
+            let mods = gesture.current_event_state();
+            let ctrl = mods.contains(gdk4::ModifierType::CONTROL_MASK);
+            let alt = mods.contains(gdk4::ModifierType::ALT_MASK);
+            let shift = mods.contains(gdk4::ModifierType::SHIFT_MASK);
+            let super_key = mods.contains(gdk4::ModifierType::SUPER_MASK);
+
+            // Plain unmodified single left-click is just clicking the button to toggle learning mode
+            if btn_num == 1 && !ctrl && !alt && !shift && !super_key && n_press < 2 {
+                return;
+            }
+
+            let new_binding = if n_press >= 2 && btn_num == 1 && !ctrl && !alt && !shift {
+                ZoomComboBinding::DoubleClick
+            } else {
+                let mapped_btn = match btn_num {
+                    1 => 1u8,
+                    2 => 2u8,
+                    3 => 3u8,
+                    8 | 9 => 4u8,
+                    _ => 2u8,
+                };
+                let mut parts = Vec::new();
+                if ctrl {
+                    parts.push("⌃ Ctrl");
+                }
+                if alt {
+                    parts.push("⌥ Alt");
+                }
+                if shift {
+                    parts.push("⇧ Shift");
+                }
+                if super_key {
+                    parts.push("⌘ Super");
+                }
+                parts.push(match mapped_btn {
+                    1 => "Click",
+                    2 => "🖱️ Mid-Click",
+                    3 => "🖱️ Right-Click",
+                    _ => "🖱️ Side-Btn",
+                });
+                let label = parts.join(" + ");
+                ZoomComboBinding::Custom {
+                    ctrl,
+                    alt,
+                    shift,
+                    super_key,
+                    mouse_button: mapped_btn,
+                    keycode: 0,
+                    shake: false,
+                    label,
+                }
+            };
+
+            let lbl = new_binding.short_label();
+            st.lock().zoom_cfg.combo_binding = new_binding;
+            learn_flag.store(false, Ordering::Relaxed);
+            for b in &btns {
+                b.remove_css_class("seg-active");
+            }
+            rec_b.set_label(&lbl);
+            rec_b.add_css_class("action-chip");
+        });
+        record_combo_btn.add_controller(bind_click);
+    }
+
+    // Window-level keyboard listener for "Record Combo…" AND live keyboard combo triggering
+    {
+        let learn_flag = learning_combo.clone();
+        let st = state.clone();
+        let btns = combo_preset_btns.clone();
+        let rec_b = record_combo_btn.clone();
+        let key_ctrl = EventControllerKey::new();
+        key_ctrl.connect_key_pressed(move |_, keyval, hw_keycode, mods| {
+            let key_name = keyval.name().map(|s| s.to_string()).unwrap_or_default();
+            // Ignore bare modifier presses while waiting for the combo
+            if matches!(
+                key_name.as_str(),
+                "Control_L"
+                    | "Control_R"
+                    | "Shift_L"
+                    | "Shift_R"
+                    | "Alt_L"
+                    | "Alt_R"
+                    | "Super_L"
+                    | "Super_R"
+                    | "Meta_L"
+                    | "Meta_R"
+            ) {
+                return glib::Propagation::Proceed;
+            }
+
+            let ctrl = mods.contains(gdk4::ModifierType::CONTROL_MASK);
+            let alt = mods.contains(gdk4::ModifierType::ALT_MASK);
+            let shift = mods.contains(gdk4::ModifierType::SHIFT_MASK);
+            let super_key = mods.contains(gdk4::ModifierType::SUPER_MASK);
+            let kc = hw_keycode;
+
+            if learn_flag.load(Ordering::Relaxed) {
+                let mut parts = Vec::new();
+                if ctrl {
+                    parts.push("⌃ Ctrl".to_string());
+                }
+                if alt {
+                    parts.push("⌥ Alt".to_string());
+                }
+                if shift {
+                    parts.push("⇧ Shift".to_string());
+                }
+                if super_key {
+                    parts.push("⌘ Super".to_string());
+                }
+                let short_key = if key_name.is_empty() {
+                    format!("Key#{kc}")
+                } else {
+                    key_name.to_uppercase()
+                };
+                parts.push(short_key);
+                let label = format!("⌨️ {}", parts.join("+"));
+                let new_binding = ZoomComboBinding::Custom {
+                    ctrl,
+                    alt,
+                    shift,
+                    super_key,
+                    mouse_button: 0,
+                    keycode: kc,
+                    shake: false,
+                    label: label.clone(),
+                };
+                let disp = new_binding.short_label();
+                st.lock().zoom_cfg.combo_binding = new_binding;
+                learn_flag.store(false, Ordering::Relaxed);
+                for b in &btns {
+                    b.remove_css_class("seg-active");
+                }
+                rec_b.set_label(&disp);
+                rec_b.add_css_class("action-chip");
+                return glib::Propagation::Stop;
+            }
+
+            // If not learning, check if this key matches a custom key binding to toggle zoom immediately
+            let mut g = st.lock();
+            if let ZoomComboBinding::Custom {
+                ctrl: c_req,
+                alt: a_req,
+                shift: s_req,
+                super_key: u_req,
+                mouse_button: 0,
+                keycode: req_kc,
+                ..
+            } = g.zoom_cfg.combo_binding.clone()
+            {
+                if req_kc != 0 && req_kc == kc && (!c_req || ctrl) && (!a_req || alt) && (!s_req || shift) && (!u_req || super_key) {
+                    let cx = g.last_cursor.smooth_x.clamp(0.18, 0.82);
+                    let cy = g.last_cursor.smooth_y.clamp(0.18, 0.82);
+                    let tz = g.zoom_cfg.target_zoom;
+                    g.zoom_engine.toggle_manual_lock(cx, cy, tz);
+                    return glib::Propagation::Stop;
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctrl);
+    }
+
+    {
+        let st = state.clone();
+        combo_action_btn.connect_clicked(move |btn| {
+            let mut g = st.lock();
+            g.zoom_cfg.combo_action = match g.zoom_cfg.combo_action {
+                ComboActionMode::ToggleLock => ComboActionMode::HoldToZoom,
+                ComboActionMode::HoldToZoom => ComboActionMode::StepCycle,
+                ComboActionMode::StepCycle => ComboActionMode::ToggleLock,
+            };
+            let lbl = g.zoom_cfg.combo_action.label();
+            drop(g);
+            btn.set_label(lbl);
+        });
+    }
+
+    combo_track.append(&c_shake_mid);
+    combo_track.append(&c_mid);
+    combo_track.append(&c_ctrl);
+    combo_track.append(&c_dbl);
+    ctrl_card.append(&combo_track);
+
+    let combo_custom_row = GtkBox::new(Orientation::Horizontal, 6);
+    combo_custom_row.append(&record_combo_btn);
+    combo_custom_row.append(&combo_action_btn);
+    ctrl_card.append(&combo_custom_row);
 
     // Wire Dark / Light Theme toggle across top button + segmented switcher
     {
@@ -1304,6 +1616,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let wave = wave_indicator.clone();
         let z_hist = zoom_history.clone();
         let busy_flag = bg_zoom_busy.clone();
+        let learn_flag = learning_combo.clone();
+        let rec_combo_b = record_combo_btn.clone();
+        let preset_btns = combo_preset_btns.clone();
         let mut last_z_str = String::new();
         let mut last_c_str = String::new();
         let mut last_s_str = String::new();
@@ -1319,10 +1634,96 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let vp = g.last_viewport;
             let cur = g.last_cursor;
             let target_z = g.zoom_cfg.target_zoom;
+            let manual_locked = g.zoom_engine.manual_locked;
+            let is_combo_only = matches!(g.zoom_cfg.mode, AutoZoomMode::Manual);
             let is_rec = g.encoder_session.is_some();
             let elapsed = g.recording_elapsed_sec();
             let last_saved = g.last_saved_file.clone();
+
+            // Check if user is in "Record Combo…" self-registration mode and performed a global gesture/button/key
+            let mut learned_label: Option<String> = None;
+            if learn_flag.load(Ordering::Relaxed) {
+                let candidate = if cur.shake_gesture {
+                    Some(ZoomComboBinding::CursorShake)
+                } else if cur.middle_down {
+                    Some(ZoomComboBinding::MiddleClick)
+                } else if cur.side_down {
+                    Some(ZoomComboBinding::SideButton)
+                } else if cur.double_clicked {
+                    Some(ZoomComboBinding::DoubleClick)
+                } else if (cur.ctrl_down || cur.alt_down || cur.shift_down || cur.super_down)
+                    && (cur.left_down || cur.right_down)
+                {
+                    let mut parts = Vec::new();
+                    if cur.ctrl_down {
+                        parts.push("⌃ Ctrl");
+                    }
+                    if cur.alt_down {
+                        parts.push("⌥ Alt");
+                    }
+                    if cur.shift_down {
+                        parts.push("⇧ Shift");
+                    }
+                    if cur.super_down {
+                        parts.push("⌘ Super");
+                    }
+                    parts.push(if cur.right_down { "Right-Click" } else { "Click" });
+                    Some(ZoomComboBinding::Custom {
+                        ctrl: cur.ctrl_down,
+                        alt: cur.alt_down,
+                        shift: cur.shift_down,
+                        super_key: cur.super_down,
+                        mouse_button: if cur.right_down { 3 } else { 1 },
+                        keycode: 0,
+                        shake: false,
+                        label: parts.join(" + "),
+                    })
+                } else if cur.active_keycode != 0 {
+                    let kc = cur.active_keycode;
+                    let mut parts = Vec::new();
+                    if cur.ctrl_down {
+                        parts.push("⌃ Ctrl".to_string());
+                    }
+                    if cur.alt_down {
+                        parts.push("⌥ Alt".to_string());
+                    }
+                    if cur.shift_down {
+                        parts.push("⇧ Shift".to_string());
+                    }
+                    if cur.super_down {
+                        parts.push("⌘ Super".to_string());
+                    }
+                    parts.push(format!("Key#{kc}"));
+                    Some(ZoomComboBinding::Custom {
+                        ctrl: cur.ctrl_down,
+                        alt: cur.alt_down,
+                        shift: cur.shift_down,
+                        super_key: cur.super_down,
+                        mouse_button: 0,
+                        keycode: kc,
+                        shake: false,
+                        label: format!("⌨️ {}", parts.join("+")),
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(binding) = candidate {
+                    let lbl = binding.short_label();
+                    g.zoom_cfg.combo_binding = binding;
+                    learn_flag.store(false, Ordering::Relaxed);
+                    learned_label = Some(lbl);
+                }
+            }
             drop(g);
+
+            if let Some(lbl) = learned_label {
+                for b in &preset_btns {
+                    b.remove_css_class("seg-active");
+                }
+                rec_combo_b.set_label(&lbl);
+                rec_combo_b.add_css_class("action-chip");
+            }
 
             ui_div = ui_div.wrapping_add(1);
             // Throttle GTK label/canvas redraws to ~30Hz while keeping telemetry sampling at 60Hz
@@ -1340,8 +1741,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             was_busy = is_busy;
 
             let is_zoomed = vp.zoom > 1.06;
-            let new_z = if is_zoomed {
+            let new_z = if manual_locked {
+                format!("🔒 {:.1}× Lock", vp.zoom.max(1.2))
+            } else if is_zoomed {
                 format!("{:.1}× Zoom", vp.zoom)
+            } else if is_combo_only {
+                format!("{:.1}× Combo", target_z)
             } else {
                 format!("{:.1}× Auto", target_z)
             };

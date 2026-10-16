@@ -236,6 +236,7 @@ mod tests {
                 cursor_x: cx,
                 cursor_y: cy,
                 clicked: (i % 350) == 40,
+                manual_lock: false,
             });
         }
 
@@ -255,6 +256,113 @@ mod tests {
             let dz = (pair[1].2 - pair[0].2).abs();
             assert!(dz < 0.045, "Unsmooth frame-to-frame zoom jump detected: dz={dz}");
         }
+    }
+
+    #[test]
+    fn test_manual_combo_zoom_and_custom_self_binder() {
+        use crate::cursor::SystemInputState;
+        use crate::encoder::{build_smooth_60fps_camera_frames, RecordedZoomEvent};
+        use crate::zoom_engine::{ComboActionMode, ZoomComboBinding};
+
+        let mut engine = ZoomEngine::new();
+        let mut tracker = CursorTracker::new();
+        let cur_cfg = CursorConfig::default();
+        let mut zoom_cfg = ZoomConfig::default();
+        // Configure user-registered custom combo: Ctrl + Right Click in ToggleLock mode
+        zoom_cfg.combo_binding = ZoomComboBinding::Custom {
+            ctrl: true,
+            alt: false,
+            shift: false,
+            super_key: false,
+            mouse_button: 3,
+            keycode: 0,
+            shake: false,
+            label: "⌃ Ctrl + Right-Click".to_string(),
+        };
+        zoom_cfg.combo_action = ComboActionMode::ToggleLock;
+        zoom_cfg.target_zoom = 2.40;
+
+        // 1. Trigger the custom combo at t = 100ms
+        let (s1, c1) = tracker.update_with_input(
+            100,
+            0.65,
+            0.40,
+            SystemInputState {
+                right_down: true,
+                ctrl_down: true,
+                ..Default::default()
+            },
+            &cur_cfg,
+        );
+        engine.step(100, s1, c1, 0, &zoom_cfg);
+        assert!(engine.manual_locked, "Custom Ctrl+RightClick combo should engage manual lock!");
+
+        // 2. Keep combo locked for 6 full seconds (longer than the 1.65s auto-zoom hold!)
+        let mut vp = Default::default();
+        for step in 1..=375 {
+            let t_ms = 100 + step * 16;
+            let (s, c) = tracker.update_with_input(
+                t_ms,
+                0.65,
+                0.40,
+                SystemInputState::default(),
+                &cur_cfg,
+            );
+            vp = engine.step(t_ms, s, c, 0, &zoom_cfg);
+        }
+        assert!(
+            vp.zoom > 2.30,
+            "Manual combo lock must stay zoomed in for as long as the user wants! Got {}",
+            vp.zoom
+        );
+
+        // 3. Test scroll wheel zoom adjustment while locked
+        engine.adjust_manual_zoom_wheel(0.65, 0.40, 0.40);
+        for step in 376..=420 {
+            let t_ms = 100 + step * 16;
+            let (s, c) = tracker.update_with_input(t_ms, 0.65, 0.40, SystemInputState::default(), &cur_cfg);
+            vp = engine.step(t_ms, s, c, 0, &zoom_cfg);
+        }
+        assert!(vp.zoom > 2.65, "Scroll wheel should increase locked zoom depth, got {}", vp.zoom);
+
+        // 4. Trigger the custom combo again to unlock back to 1.0x
+        let (s_off, c_off) = tracker.update_with_input(
+            7000,
+            0.65,
+            0.40,
+            SystemInputState {
+                right_down: true,
+                ctrl_down: true,
+                ..Default::default()
+            },
+            &cur_cfg,
+        );
+        engine.step(7000, s_off, c_off, 0, &zoom_cfg);
+        assert!(!engine.manual_locked, "Second combo trigger should unlock manual zoom!");
+
+        // 5. Verify encoder trajectory planner honors a 5-second manual_lock segment without cutting it off at 1.75s
+        let mut events = Vec::new();
+        for i in 0..200 {
+            let t = i as f32 * 0.04; // 8 seconds total
+            let locked = (1.0..=6.0).contains(&t);
+            events.push(RecordedZoomEvent {
+                timestamp_sec: t,
+                center_x: 0.65,
+                center_y: 0.40,
+                zoom: if locked { 2.40 } else { 1.0 },
+                cursor_x: 0.65,
+                cursor_y: 0.40,
+                clicked: false,
+                manual_lock: locked,
+            });
+        }
+        let frames = build_smooth_60fps_camera_frames(&events, 8 * 60);
+        // At t = 4.5s (frame 270), well past the 1.75s auto-zoom cap, manual_lock must STILL be zoomed in > 2.2x!
+        assert!(
+            frames[270].2 > 2.25,
+            "Encoder trajectory planner must preserve manual_lock zoom at t=4.5s! Got {}",
+            frames[270].2
+        );
     }
 
     #[test]

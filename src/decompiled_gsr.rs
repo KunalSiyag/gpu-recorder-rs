@@ -27,12 +27,17 @@ pub struct PipelineStageComparison {
 
 impl GsrDecompiledReport {
     pub fn probe_system() -> Self {
-        let flatpak_base = "/home/kunalsiyag/.local/share/flatpak/app/com.dec05eba.gpu_screen_recorder/x86_64/stable/6f1120bd2356fcd67543acc4556e329d6b36e525decdb9adae329b821dded04e/files";
+        let current_base = "/home/kunalsiyag/.local/share/flatpak/app/com.dec05eba.gpu_screen_recorder/current/active/files";
+        let legacy_base = "/home/kunalsiyag/.local/share/flatpak/app/com.dec05eba.gpu_screen_recorder/x86_64/stable/6f1120bd2356fcd67543acc4556e329d6b36e525decdb9adae329b821dded04e/files";
+        let flatpak_base = if Path::new(&format!("{current_base}/bin/gpu-screen-recorder")).exists() {
+            current_base
+        } else {
+            legacy_base
+        };
         let gsr_bin = format!("{flatpak_base}/bin/gpu-screen-recorder");
         let system_bridge = "/var/lib/flatpak/app/com.dec05eba.gpu_screen_recorder/current/active/files/bin/gsr-wayland-bridge";
 
-        let wayland_bridge_bug_detected =
-            Path::new(&gsr_bin).exists() && !Path::new(system_bridge).exists();
+        let wayland_bridge_bug_detected = !Path::new(system_bridge).exists();
         let wayland_bridge_bug_details = if wayland_bridge_bug_detected {
             format!(
                 "Binary at {gsr_bin} hardcodes '{system_bridge}' in .rodata, which fails on --user Flatpak installs. Bypassed in gpu-recorder-rs via direct X11/DMA-BUF/FFmpeg hardware capture."

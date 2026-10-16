@@ -69,6 +69,8 @@ pub struct RecordedZoomEvent {
     pub cursor_y: f32,
     #[serde(default)]
     pub clicked: bool,
+    #[serde(default)]
+    pub manual_lock: bool,
 }
 
 pub enum RecordingEngineKind {
@@ -327,13 +329,14 @@ impl ActiveEncoderSession {
         cursor_x: f32,
         cursor_y: f32,
         clicked: bool,
+        manual_lock: bool,
     ) {
         self.frames_written += 1;
         let should_push = clicked
             || self
                 .zoom_events
                 .last()
-                .map(|last| (t_sec - last.timestamp_sec) >= 0.015)
+                .map(|last| last.manual_lock != manual_lock || (t_sec - last.timestamp_sec) >= 0.015)
                 .unwrap_or(true);
         if should_push && self.zoom_events.len() < 36_000 {
             self.zoom_events.push(RecordedZoomEvent {
@@ -344,6 +347,7 @@ impl ActiveEncoderSession {
                 cursor_x,
                 cursor_y,
                 clicked,
+                manual_lock,
             });
         }
     }
@@ -666,6 +670,7 @@ pub fn build_smooth_60fps_camera_frames(
     let mut raw_cy = vec![0.5f32; total_frames];
     let mut rec_z = vec![1.0f32; total_frames];
     let mut rec_click = vec![false; total_frames];
+    let mut rec_manual = vec![false; total_frames];
 
     for f in 0..total_frames {
         let t = f as f32 / 60.0;
@@ -674,17 +679,28 @@ pub fn build_smooth_60fps_camera_frames(
         raw_cy[f] = cy;
         rec_z[f] = z;
     }
-    for ev in events {
+    for (idx_ev, ev) in events.iter().enumerate() {
+        let idx = ((ev.timestamp_sec * 60.0).round() as usize).min(total_frames.saturating_sub(1));
         if ev.clicked {
-            let idx = ((ev.timestamp_sec * 60.0).round() as usize).min(total_frames.saturating_sub(1));
             rec_click[idx] = true;
+        }
+        if ev.manual_lock {
+            let next_t = events
+                .get(idx_ev + 1)
+                .map(|n| n.timestamp_sec)
+                .unwrap_or(ev.timestamp_sec + 0.02);
+            let end_idx = ((next_t * 60.0).ceil() as usize).min(total_frames.saturating_sub(1));
+            for m_f in idx..=end_idx {
+                rec_manual[m_f] = true;
+            }
         }
     }
 
-    // Step 2: Screen Studio Segment Planner
-    // Prevents the camera from staying zoomed in for long periods!
-    // Each zoom segment holds for at most ~105 frames (1.75 seconds) unless re-triggered after a cooldown,
-    // and immediately drops back to 1.0x on fast cross-screen cursor movement.
+    // Step 2: Hybrid Manual Liberty + Screen Studio Segment Planner
+    // - Whenever `rec_manual[f]` is true (user triggered their Manual Zoom Combo / Lock / Wheel),
+    //   the camera honors the user's exact zoom duration and depth without cutting it off!
+    // - Whenever `rec_manual[f]` is false, automatic zoom segments hold for at most ~105 frames (1.75s)
+    //   and return cleanly to 1.0x wide view.
     let mut target_z = vec![1.0f32; total_frames];
     let mut target_x = vec![0.5f32; total_frames];
     let mut target_y = vec![0.5f32; total_frames];
@@ -694,12 +710,36 @@ pub fn build_smooth_60fps_camera_frames(
     let mut anchor_x = raw_cx[0];
     let mut anchor_y = raw_cy[0];
     let mut prev_rec_high = false;
+    let mut prev_manual = false;
     let mut settle_counter: usize = 0;
     let mut traveled_since_last = true;
 
     for f in 0..total_frames {
         let cx = raw_cx[f];
         let cy = raw_cy[f];
+
+        if rec_manual[f] {
+            if !prev_manual {
+                anchor_x = cx;
+                anchor_y = cy;
+            }
+            prev_manual = true;
+            hold_remaining = 0;
+            let dx = cx - anchor_x;
+            let dy = cy - anchor_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let deadzone = 0.045;
+            if dist > deadzone {
+                let pull = (dist - deadzone) / dist;
+                anchor_x += dx * pull * 0.28;
+                anchor_y += dy * pull * 0.28;
+            }
+            target_z[f] = rec_z[f].max(peak_zoom).clamp(1.25, 3.5);
+            target_x[f] = anchor_x;
+            target_y[f] = anchor_y;
+            continue;
+        }
+        prev_manual = false;
 
         // Compute cursor speed over a 6-frame (100ms) window
         let prev_f = f.saturating_sub(6);
