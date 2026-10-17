@@ -1,165 +1,127 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="100%" height="100%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="1200" height="420">
   <defs>
-    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#07090E"/>
-      <stop offset="50%" stop-color="#0D111A"/>
-      <stop offset="100%" stop-color="#090D16"/>
+    <linearGradient id="solarSpectrum" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffb931" stop-opacity="0.9"/>
+      <stop offset="38%" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="75%" stop-color="#2e73fc" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#3fb950" stop-opacity="0.85"/>
     </linearGradient>
-    <radialGradient id="glowCyan" cx="72%" cy="42%" r="45%">
-      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.22"/>
-      <stop offset="60%" stop-color="#6366F1" stop-opacity="0.08"/>
-      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    <radialGradient id="subtleGlow" cx="76%" cy="48%" r="42%">
+      <stop offset="0%" stop-color="#2e73fc" stop-opacity="0.10"/>
+      <stop offset="55%" stop-color="#ffb931" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#0a0a0a" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="glowRed" cx="22%" cy="20%" r="38%">
-      <stop offset="0%" stop-color="#F43F5E" stop-opacity="0.16"/>
-      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="islandBg" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#181C26"/>
-      <stop offset="100%" stop-color="#0F1219"/>
-    </linearGradient>
-    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#38BDF8"/>
-      <stop offset="50%" stop-color="#818CF8"/>
-      <stop offset="100%" stop-color="#C084FC"/>
-    </linearGradient>
-    <linearGradient id="recGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#FB7185"/>
-      <stop offset="100%" stop-color="#E11D48"/>
-    </linearGradient>
-    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="130%">
-      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.65"/>
-    </filter>
+    <pattern id="dovetailGrid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#1c1c1c" stroke-width="1"/>
+    </pattern>
   </defs>
 
-  <!-- Background -->
-  <rect width="1200" height="420" rx="22" fill="url(#bgGrad)"/>
-  <rect width="1200" height="420" rx="22" fill="url(#glowCyan)"/>
-  <rect width="1200" height="420" rx="22" fill="url(#glowRed)"/>
-  <rect x="1" y="1" width="1198" height="418" rx="21" fill="none" stroke="#1E293B" stroke-width="1.5"/>
+  <!-- Graphite Obsidian Canvas (#0a0a0a) with 10px radius and #262626 1px hairline -->
+  <rect width="1200" height="420" rx="10" fill="#0a0a0a"/>
+  <rect width="1200" height="420" rx="10" fill="url(#dovetailGrid)" opacity="0.75"/>
+  <rect width="1200" height="420" rx="10" fill="url(#subtleGlow)"/>
+  <rect x="0.5" y="0.5" width="1199" height="419" rx="9.5" fill="none" stroke="#262626" stroke-width="1"/>
 
-  <!-- Subtle Grid -->
-  <g stroke="#1E293B" stroke-width="0.6" opacity="0.45">
-    <line x1="0" y1="84" x2="1200" y2="84"/>
-    <line x1="0" y1="168" x2="1200" y2="168"/>
-    <line x1="0" y1="252" x2="1200" y2="252"/>
-    <line x1="0" y1="336" x2="1200" y2="336"/>
-    <line x1="240" y1="0" x2="240" y2="420"/>
-    <line x1="480" y1="0" x2="480" y2="420"/>
-    <line x1="720" y1="0" x2="720" y2="420"/>
-    <line x1="960" y1="0" x2="960" y2="420"/>
+  <!-- Top Spectral Signal Rule -->
+  <rect x="1" y="1" width="1198" height="1.5" fill="url(#solarSpectrum)" opacity="0.85"/>
+
+  <!-- Ossium Blueprint Corner + Markers -->
+  <g stroke="#464646" stroke-width="1.2">
+    <path d="M 20 14 L 20 26 M 14 20 L 26 20"/>
+    <path d="M 1180 14 L 1180 26 M 1174 20 L 1186 20"/>
+    <path d="M 20 394 L 20 406 M 14 400 L 26 400"/>
+    <path d="M 1180 394 L 1180 406 M 1174 400 L 1186 400"/>
   </g>
 
-  <!-- Top Center Mock Dynamic Island Capsule -->
-  <g filter="url(#dropShadow)" transform="translate(310, 22)">
-    <rect x="0" y="0" width="580" height="48" rx="24" fill="url(#islandBg)" stroke="#334155" stroke-width="1.2"/>
-    <!-- Pulsing Recording Dot -->
-    <circle cx="28" cy="24" r="6" fill="#F43F5E">
-      <animate attributeName="opacity" values="1;0.35;1" dur="1.6s" repeatCount="indefinite"/>
-    </circle>
-    <circle cx="28" cy="24" r="11" fill="none" stroke="#F43F5E" stroke-width="1.5" opacity="0.45">
-      <animate attributeName="r" values="6;13;6" dur="1.6s" repeatCount="indefinite"/>
-      <animate attributeName="opacity" values="0.7;0;0.7" dur="1.6s" repeatCount="indefinite"/>
-    </circle>
-    <text x="48" y="29" fill="#F8FAFC" font-family="Inter, system-ui, -apple-system, sans-serif" font-size="13.5" font-weight="700">HyperGSR</text>
-    <text x="122" y="29" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="12.5" font-weight="600">00:42</text>
+  <!-- Top Center Wayland Layer-Shell Dynamic Island Shell -->
+  <g transform="translate(300, 22)">
+    <rect x="0" y="0" width="600" height="42" rx="10" fill="#111111" stroke="#262626" stroke-width="1"/>
+    <!-- Live Status Dot -->
+    <circle cx="22" cy="21" r="4.5" fill="#ef4444"/>
+    <text x="36" y="25" fill="#fafafa" font-family="Geist, Inter, system-ui, sans-serif" font-size="13" font-weight="600">HyperGSR</text>
+    <text x="106" y="25" fill="#a1a1a1" font-family="Geist Mono, JetBrains Mono, monospace" font-size="12">00:42</text>
 
-    <!-- Live Cursor Pill -->
-    <rect x="174" y="10" width="112" height="28" rx="14" fill="#1E2534" stroke="#334155" stroke-width="0.8"/>
-    <text x="230" y="28" text-anchor="middle" fill="#CBD5E1" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="600">X:64% Y:38%</text>
+    <line x1="154" y1="10" x2="154" y2="32" stroke="#262626" stroke-width="1"/>
 
-    <!-- Active Zoom Pill -->
-    <rect x="296" y="10" width="96" height="28" rx="14" fill="#0F2942" stroke="#38BDF8" stroke-width="1"/>
-    <text x="344" y="28" text-anchor="middle" fill="#38BDF8" font-family="Inter, system-ui, sans-serif" font-size="11.5" font-weight="700">2.0× Zoom</text>
+    <!-- DRM Telemetry Tag -->
+    <rect x="166" y="8" width="176" height="26" rx="4" fill="#171717" stroke="#262626" stroke-width="1"/>
+    <circle cx="179" cy="21" r="3.5" fill="#3fb950"/>
+    <text x="190" y="25" fill="#d4d4d4" font-family="Geist Mono, JetBrains Mono, monospace" font-size="11" font-weight="500">DRM #92 X:64% Y:38%</text>
 
-    <!-- Record Button -->
-    <rect x="404" y="9" width="78" height="30" rx="15" fill="url(#recGrad)"/>
-    <text x="443" y="28" text-anchor="middle" fill="#FFFFFF" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="700">● Live</text>
+    <!-- Active Spring Zoom Tag -->
+    <rect x="350" y="8" width="96" height="26" rx="4" fill="#171717" stroke="#464646" stroke-width="1"/>
+    <text x="398" y="25" text-anchor="middle" fill="#fafafa" font-family="Geist Mono, JetBrains Mono, monospace" font-size="11" font-weight="500">2.00x AUTO</text>
 
-    <!-- Studio Drawer Button -->
-    <rect x="492" y="9" width="76" height="30" rx="15" fill="#1E293B" stroke="#475569" stroke-width="0.8"/>
-    <text x="530" y="28" text-anchor="middle" fill="#E2E8F0" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="600">Studio ▾</text>
+    <!-- Pale Primary Control -->
+    <rect x="456" y="8" width="64" height="26" rx="6" fill="#e5e5e5"/>
+    <text x="488" y="25" text-anchor="middle" fill="#171717" font-family="Geist, Inter, system-ui, sans-serif" font-size="11.5" font-weight="600">Record</text>
+
+    <!-- Charcoal Secondary Control -->
+    <rect x="528" y="8" width="62" height="26" rx="6" fill="#262626" stroke="#464646" stroke-width="1"/>
+    <text x="559" y="25" text-anchor="middle" fill="#fafafa" font-family="Geist, Inter, system-ui, sans-serif" font-size="11.5" font-weight="500">Studio</text>
   </g>
 
-  <!-- Left Column: Headlines & Value Proposition -->
-  <g transform="translate(64, 128)">
-    <rect x="0" y="0" width="295" height="28" rx="14" fill="#111C2D" stroke="#38BDF8" stroke-width="1"/>
-    <text x="147" y="18" text-anchor="middle" fill="#38BDF8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">SCREEN STUDIO FOR LINUX WAYLAND</text>
+  <!-- Left Column: Graphite Display Typography & Blueprint Telemetry -->
+  <g transform="translate(56, 108)">
+    <!-- Resend Status Eyebrow -->
+    <circle cx="6" cy="8" r="4" fill="#3fb950"/>
+    <text x="18" y="12" fill="#a1a1a1" font-family="Geist Mono, JetBrains Mono, monospace" font-size="11" font-weight="500" letter-spacing="1.2">RUST • WAYLAND + X11 • PIPEWIRE • NVENC / VAAPI</text>
 
-    <text x="0" y="74" fill="#F8FAFC" font-family="Inter, system-ui, -apple-system, sans-serif" font-size="44" font-weight="800" letter-spacing="-1">
-      HyperGSR <tspan fill="url(#accentGrad)">Studio</tspan>
-    </text>
+    <!-- Tight 500-weight Display Heading -->
+    <text x="0" y="62" fill="#fafafa" font-family="Geist, Inter, system-ui, sans-serif" font-size="42" font-weight="500" letter-spacing="-1.3">The camera follows your cursor.</text>
+    <text x="0" y="112" fill="#808080" font-family="Geist, Inter, system-ui, sans-serif" font-size="42" font-weight="500" letter-spacing="-1.3">On Wayland, in 56 MB.</text>
 
-    <text x="0" y="114" fill="#94A3B8" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="500">
-      Zero-Copy GPU Screen Recorder with Native Wayland DRM Cursor
-    </text>
-    <text x="0" y="140" fill="#94A3B8" font-family="Inter, system-ui, sans-serif" font-size="17" font-weight="500">
-      Tracking, 240Hz Spring-Physics Auto-Zoom &amp; Dynamic Island HUD.
-    </text>
+    <text x="0" y="150" fill="#a1a1a1" font-family="Geist, Inter, system-ui, sans-serif" font-size="15.5" font-weight="400">Reads the cursor from the DRM hardware cursor plane without root,</text>
+    <text x="0" y="172" fill="#a1a1a1" font-family="Geist, Inter, system-ui, sans-serif" font-size="15.5" font-weight="400">then moves a critically damped spring camera to where you work.</text>
 
-    <!-- Metric Pills -->
-    <g transform="translate(0, 174)">
-      <rect x="0" y="0" width="142" height="58" rx="12" fill="#111622" stroke="#1E293B" stroke-width="1.2"/>
-      <text x="16" y="25" fill="#38BDF8" font-family="JetBrains Mono, monospace" font-size="18" font-weight="800">~56 MB</text>
-      <text x="16" y="45" fill="#64748B" font-family="Inter, system-ui, sans-serif" font-size="11.5" font-weight="600">Native Rust RAM</text>
+    <!-- Dashed Blueprint Telemetry Strip -->
+    <g transform="translate(0, 200)">
+      <rect x="0" y="0" width="640" height="74" rx="10" fill="#111111" stroke="#262626" stroke-width="1"/>
+      <line x1="160" y1="0" x2="160" y2="74" stroke="#262626" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="320" y1="0" x2="320" y2="74" stroke="#262626" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="480" y1="0" x2="480" y2="74" stroke="#262626" stroke-width="1" stroke-dasharray="4 4"/>
 
-      <rect x="156" y="0" width="142" height="58" rx="12" fill="#111622" stroke="#1E293B" stroke-width="1.2"/>
-      <text x="172" y="25" fill="#10B981" font-family="JetBrains Mono, monospace" font-size="18" font-weight="800">&lt; 1.5%</text>
-      <text x="172" y="45" fill="#64748B" font-family="Inter, system-ui, sans-serif" font-size="11.5" font-weight="600">CPU @ 60 FPS</text>
+      <text x="20" y="26" fill="#808080" font-family="Geist Mono, JetBrains Mono, monospace" font-size="10.5" letter-spacing="0.8">MEMORY RSS</text>
+      <text x="20" y="54" fill="#fafafa" font-family="Geist Mono, JetBrains Mono, monospace" font-size="22" font-weight="500">56 MB</text>
 
-      <rect x="312" y="0" width="165" height="58" rx="12" fill="#111622" stroke="#1E293B" stroke-width="1.2"/>
-      <text x="328" y="25" fill="#C084FC" font-family="JetBrains Mono, monospace" font-size="18" font-weight="800">DRM #92</text>
-      <text x="328" y="45" fill="#64748B" font-family="Inter, system-ui, sans-serif" font-size="11.5" font-weight="600">Rootless Wayland Cursor</text>
+      <text x="180" y="26" fill="#808080" font-family="Geist Mono, JetBrains Mono, monospace" font-size="10.5" letter-spacing="0.8">CPU @ 1080P60</text>
+      <text x="180" y="54" fill="#3fb950" font-family="Geist Mono, JetBrains Mono, monospace" font-size="22" font-weight="500">&lt; 1.5%</text>
 
-      <rect x="491" y="0" width="160" height="58" rx="12" fill="#111622" stroke="#1E293B" stroke-width="1.2"/>
-      <text x="507" y="25" fill="#F43F5E" font-family="JetBrains Mono, monospace" font-size="18" font-weight="800">240 Hz</text>
-      <text x="507" y="45" fill="#64748B" font-family="Inter, system-ui, sans-serif" font-size="11.5" font-weight="600">C² Spring Camera</text>
+      <text x="340" y="26" fill="#808080" font-family="Geist Mono, JetBrains Mono, monospace" font-size="10.5" letter-spacing="0.8">WAYLAND CURSOR</text>
+      <text x="340" y="54" fill="#fafafa" font-family="Geist Mono, JetBrains Mono, monospace" font-size="22" font-weight="500">DRM #92</text>
+
+      <text x="500" y="26" fill="#808080" font-family="Geist Mono, JetBrains Mono, monospace" font-size="10.5" letter-spacing="0.8">CAMERA SOLVER</text>
+      <text x="500" y="54" fill="#fafafa" font-family="Geist Mono, JetBrains Mono, monospace" font-size="22" font-weight="500">240 Hz ODE</text>
     </g>
   </g>
 
-  <!-- Right Column: Animated Virtual Camera Radar & Spring Telemetry Preview -->
-  <g transform="translate(760, 108)" filter="url(#dropShadow)">
-    <rect x="0" y="0" width="380" height="256" rx="18" fill="#0E131D" stroke="#263248" stroke-width="1.5"/>
-    <text x="20" y="28" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">16:9 VIRTUAL CAMERA &amp; SPRING SOLVER</text>
-    <text x="360" y="28" text-anchor="end" fill="#10B981" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">● NVENC 60FPS</text>
+  <!-- Right Column: Graphite Hollow Luminous Aperture Lattice & Product Demo Frame -->
+  <g transform="translate(744, 96)">
+    <rect x="0" y="0" width="400" height="286" rx="10" fill="#000000" stroke="#262626" stroke-width="1"/>
+    <rect x="1" y="1" width="398" height="284" rx="9" fill="none" stroke="#464646" stroke-width="0.5" opacity="0.5"/>
 
-    <!-- Screen Viewport Frame -->
-    <rect x="20" y="42" width="340" height="156" rx="10" fill="#080B11" stroke="#1E293B" stroke-width="1.2"/>
+    <!-- Top Frame Header -->
+    <text x="16" y="24" fill="#a1a1a1" font-family="Geist Mono, JetBrains Mono, monospace" font-size="11" letter-spacing="0.6">OPTICAL BENCH • 16:9 SPRING CROP</text>
+    <text x="384" y="24" text-anchor="end" fill="#3fb950" font-family="Geist Mono, JetBrains Mono, monospace" font-size="11">● NVENC P4 CFR</text>
+    <line x1="0" y1="36" x2="400" y2="36" stroke="#262626" stroke-width="1"/>
 
-    <!-- Simulated Code Lines in Background -->
-    <g opacity="0.35">
-      <rect x="38" y="60" width="90" height="6" rx="3" fill="#38BDF8"/>
-      <rect x="136" y="60" width="60" height="6" rx="3" fill="#818CF8"/>
-      <rect x="52" y="76" width="140" height="6" rx="3" fill="#475569"/>
-      <rect x="52" y="92" width="180" height="6" rx="3" fill="#64748B"/>
-      <rect x="52" y="108" width="110" height="6" rx="3" fill="#38BDF8"/>
-      <rect x="38" y="124" width="75" height="6" rx="3" fill="#C084FC"/>
-      <rect x="52" y="140" width="160" height="6" rx="3" fill="#475569"/>
-      <rect x="38" y="156" width="120" height="6" rx="3" fill="#10B981"/>
+    <!-- Hollow Rotated Rounded-Square Lattice (Graphite Luminous Polygon Spec) -->
+    <g transform="translate(200, 144)">
+      <rect x="-120" y="-68" width="240" height="136" rx="12" fill="none" stroke="#262626" stroke-width="1" transform="rotate(-4)"/>
+      <rect x="-104" y="-58" width="208" height="116" rx="10" fill="none" stroke="#464646" stroke-width="1" stroke-dasharray="4 4" transform="rotate(3)"/>
+      <rect x="-86" y="-48" width="172" height="96" rx="10" fill="none" stroke="url(#solarSpectrum)" stroke-width="1.5"/>
+      <!-- Optical Crosshair & Cursor Plane #92 Point -->
+      <line x1="-18" y1="0" x2="18" y2="0" stroke="#fafafa" stroke-width="1" opacity="0.5"/>
+      <line x1="0" y1="-18" x2="0" y2="18" stroke="#fafafa" stroke-width="1" opacity="0.5"/>
+      <circle cx="0" cy="0" r="4" fill="#3fb950"/>
+      <circle cx="0" cy="0" r="12" fill="none" stroke="#fafafa" stroke-width="1" stroke-dasharray="2 2"/>
+      <text x="-76" y="-32" fill="#fafafa" font-family="Geist Mono, JetBrains Mono, monospace" font-size="10">CROP 2.00x • ζ = 1.00</text>
     </g>
 
-    <!-- Animated Spring Zoom Crop Box -->
-    <rect x="85" y="64" width="170" height="96" rx="8" fill="#38BDF8" fill-opacity="0.09" stroke="#38BDF8" stroke-width="1.8">
-      <animate attributeName="x" values="30;115;115;30" dur="5s" repeatCount="indefinite"/>
-      <animate attributeName="y" values="48;68;68;48" dur="5s" repeatCount="indefinite"/>
-      <animate attributeName="width" values="320;160;160;320" dur="5s" repeatCount="indefinite"/>
-      <animate attributeName="height" values="144;90;90;144" dur="5s" repeatCount="indefinite"/>
-    </rect>
-
-    <!-- Animated Cursor Reticle -->
-    <g>
-      <circle cx="195" cy="113" r="6" fill="#F43F5E">
-        <animate attributeName="cx" values="190;195;195;190" dur="5s" repeatCount="indefinite"/>
-        <animate attributeName="cy" values="120;113;113;120" dur="5s" repeatCount="indefinite"/>
-      </circle>
-      <circle cx="195" cy="113" r="16" fill="none" stroke="#38BDF8" stroke-width="1.4" stroke-dasharray="4 3">
-        <animate attributeName="cx" values="190;195;195;190" dur="5s" repeatCount="indefinite"/>
-        <animate attributeName="cy" values="120;113;113;120" dur="5s" repeatCount="indefinite"/>
-      </circle>
-    </g>
-
-    <!-- Critically-Damped Spring S-Curve Footer -->
-    <path d="M 24 236 C 85 236, 110 210, 175 210 L 255 210 C 300 210, 320 236, 356 236" fill="none" stroke="url(#accentGrad)" stroke-width="2.5"/>
-    <text x="24" y="222" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="10.5">x&#776; = -k(x - x_t) - 2√k x&#775;  (Critically Damped ζ = 1.0)</text>
+    <!-- Bottom ODE Telemetry Strip -->
+    <line x1="0" y1="236" x2="400" y2="236" stroke="#262626" stroke-width="1"/>
+    <path d="M 18 278 C 78 278, 96 264, 156 264 L 248 264 C 296 264, 318 278, 382 278" fill="none" stroke="url(#solarSpectrum)" stroke-width="1.75"/>
+    <text x="18" y="252" fill="#808080" font-family="Geist Mono, JetBrains Mono, monospace" font-size="10.5">a = -k(x - target) - 2*sqrt(k)*v</text>
+    <text x="382" y="252" text-anchor="end" fill="#ff8833" font-family="Geist Mono, JetBrains Mono, monospace" font-size="10.5">src/zoom_engine.rs →</text>
   </g>
 </svg>
