@@ -70,7 +70,7 @@ modules:
         HYPERGSR_SKIP_HELPER: '1'
     build-commands:
       - cargo --offline build --release --locked
-      - cc -O2 src/pw_portal_capture.c -o hypergsr-pw-capture $(pkg-config --cflags --libs libpipewire-0.3 gio-2.0) -l:libportal.so.1 -lpthread
+      - cc -O2 src/pw_portal_capture.c -o hypergsr-pw-capture $(pkg-config --cflags --libs libpipewire-0.3 gio-2.0) -L/app/lib -l:libportal.so.1 -lpthread
       - install -Dm755 target/release/gpu-recorder-rs /app/bin/gpu-recorder-rs
       - ln -s gpu-recorder-rs /app/bin/hypergsr
       - install -Dm755 hypergsr-pw-capture /app/bin/hypergsr-pw-capture

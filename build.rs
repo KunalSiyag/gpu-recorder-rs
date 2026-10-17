@@ -10,12 +10,12 @@ fn main() {
 
     let out =
         PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("hypergsr-pw-capture");
-    let result = if std::env::var_os("HYPERGSR_SKIP_HELPER").is_some() {
-        Err("HYPERGSR_SKIP_HELPER is set".to_string())
-    } else {
-        build_helper(&out)
-    };
-    if let Err(reason) = result {
+    // Packagers that install the helper themselves (Flatpak) opt out of embedding.
+    if std::env::var_os("HYPERGSR_SKIP_HELPER").is_some() {
+        std::fs::write(&out, b"").expect("write empty helper placeholder");
+        return;
+    }
+    if let Err(reason) = build_helper(&out) {
         std::fs::write(&out, b"").expect("write empty helper placeholder");
         println!(
             "cargo:warning=hypergsr-pw-capture was not embedded ({reason}); \
