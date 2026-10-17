@@ -1,0 +1,92 @@
+# Builds the self-hosted HyperGSR Flatpak bundle attached to GitHub releases.
+# This manifest was written with AI assistance, so it must not be submitted to
+# Flathub: Flathub's Generative AI policy does not accept AI-assisted manifests.
+#
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#     build-dir packaging/flatpak/io.github.KunalSiyag.gpu_recorder_rs.yml
+#
+# Regenerate cargo-sources.json after Cargo.lock changes:
+#   flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+id: io.github.KunalSiyag.gpu_recorder_rs
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: hypergsr
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # Hardware cursor plane (libdrm), VAAPI, and NVENC.
+  - --device=dri
+  # Web Studio listens on 127.0.0.1:7878.
+  - --share=network
+  - --filesystem=xdg-videos
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/pkgconfig
+  - '*.a'
+  - '*.la'
+# FFmpeg is not built here: the Platform's ffmpeg CLI gets NVENC, VAAPI, and x264
+# from org.freedesktop.Platform.codecs-extra, which Flatpak installs with the runtime.
+modules:
+  - name: gtk4-layer-shell
+    buildsystem: meson
+    config-opts:
+      - -Dintrospection=false
+      - -Dvapi=false
+      - -Dsmoke-tests=false
+    sources:
+      - type: archive
+        url: https://github.com/wmww/gtk4-layer-shell/archive/refs/tags/v1.3.0.tar.gz
+        sha256: 1ebb01ab14e98afd1727f68f64981c37bd23305b1f131f5667c02b94cf593192
+
+  - name: libportal
+    buildsystem: meson
+    config-opts:
+      - -Dbackend-gtk3=disabled
+      - -Dbackend-gtk4=disabled
+      - -Dbackend-qt5=disabled
+      - -Dbackend-qt6=disabled
+      - -Dintrospection=false
+      - -Dvapi=false
+      - -Ddocs=false
+      - -Dtests=false
+    sources:
+      - type: archive
+        url: https://github.com/flatpak/libportal/releases/download/0.9.1/libportal-0.9.1.tar.xz
+        sha256: de801ee349ed3c255a9af3c01b1a401fab5b3fc1c35eb2fd7dfb35d4b8194d7f
+
+  - name: hypergsr
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/hypergsr/cargo
+        CARGO_NET_OFFLINE: 'true'
+        # The helper is installed next to the binary instead of being embedded.
+        HYPERGSR_SKIP_HELPER: '1'
+    build-commands:
+      - cargo --offline build --release --locked
+      - cc -O2 src/pw_portal_capture.c -o hypergsr-pw-capture $(pkg-config --cflags --libs libpipewire-0.3 gio-2.0) -l:libportal.so.1 -lpthread
+      - install -Dm755 target/release/gpu-recorder-rs /app/bin/gpu-recorder-rs
+      - ln -s gpu-recorder-rs /app/bin/hypergsr
+      - install -Dm755 hypergsr-pw-capture /app/bin/hypergsr-pw-capture
+      - install -Dm644 -t /app/share/hypergsr/assets assets/hypergsr-logo.svg assets/icon-*.svg
+      - install -Dm644 assets/hypergsr-logo.svg /app/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - install -Dm644 -t /app/share/applications assets/${FLATPAK_ID}.desktop
+      - install -Dm644 -t /app/share/metainfo assets/${FLATPAK_ID}.metainfo.xml
+      - install -Dm644 LICENSE /app/share/licenses/${FLATPAK_ID}/LICENSE
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - native
+          - node_modules
+          - .flatpak-builder
+          - build-dir
+          - repo
+      - cargo-sources.json

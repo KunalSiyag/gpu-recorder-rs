@@ -12,6 +12,12 @@
 /packaging/aur/*/hypergsr/
 /packaging/aur/*/*.tar.*
 
+# flatpak-builder state, build directory, repository, and bundles
+.flatpak-builder/
+/build-dir/
+/repo/
+/*.flatpak
+
 # Local test recordings & temporary captures
 /recordings/
 *.mp4
