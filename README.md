@@ -13,7 +13,7 @@
 [![Stars](https://img.shields.io/github/stars/KunalSiyag/gpu-recorder-rs?style=flat-square&color=a1a1a1&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/stargazers)
 
 **[Website](https://kunalsiyag.github.io/gpu-recorder-rs/)** ·
-**[Download v1.1.0](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)** ·
+**[Download v1.2.0](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)** ·
 **[Promo video (10 s, 1080p60)](https://kunalsiyag.github.io/gpu-recorder-rs/hypergsr-promo-1080p60.mp4)** ·
 **[How it works](#how-it-works)** ·
 **[Write-up on DEV](https://dev.to/kunalsiyag/cursor-following-auto-zoom-on-linux-wayland-reading-the-cursor-from-the-gpu-in-rust-4nij)** ·
@@ -154,7 +154,7 @@ To build and try the package locally, install the native build dependencies belo
 ```bash
 npm test
 npm pack
-npm install -g ./hypergsr-1.1.0.tgz --ignore-scripts
+npm install -g ./hypergsr-1.2.0.tgz --ignore-scripts
 hypergsr --report
 ```
 
@@ -164,6 +164,26 @@ Only the launcher and native runtime files are shipped, alongside the package me
 README, and license. `npm run build:native` builds the bundle without packing it.
 Keep the npm and Cargo versions in sync. Maintainers should use the Ubuntu 24.04 CI
 artifact for distribution rather than binaries built on a newer distro.
+
+### Flatpak (self-hosted bundle)
+
+Each GitHub release has a `hypergsr.flatpak` bundle that installs HyperGSR as a
+sandboxed desktop app with its own menu entry. The bundle includes gtk4-layer-shell,
+libportal, the capture helper, and an FFmpeg build with NVENC (NVIDIA driver 530 or
+newer), VAAPI, and x264. It uses the GNOME 50 runtime from Flathub.
+
+```bash
+flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+curl -LO https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest/download/hypergsr.flatpak
+flatpak install --user hypergsr.flatpak
+flatpak run io.github.KunalSiyag.gpu_recorder_rs
+```
+
+HyperGSR is not on Flathub, so `flatpak update` will not upgrade it. Install the
+newer bundle from the next release to upgrade. The sandbox can access your GPU
+devices (for the hardware cursor and encoders), your Videos folder, Wayland, and the
+local network for Web Studio. Screen capture goes through the desktop portal. To
+build the bundle yourself, see [`packaging/flatpak`](packaging/flatpak/).
 
 ### Arch Linux
 
@@ -179,10 +199,10 @@ Use `packaging/aur/hypergsr-git` instead to build the latest `main` from source.
 
 ### Prebuilt binary (x86_64)
 
-Download `hypergsr-v1.1.0-linux-x86_64.tar.gz` from the [latest release](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest), then:
+Download `hypergsr-v1.2.0-linux-x86_64.tar.gz` from the [latest release](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest), then:
 
 ```bash
-tar xzf hypergsr-v1.1.0-linux-x86_64.tar.gz
+tar xzf hypergsr-v1.2.0-linux-x86_64.tar.gz
 ./target/release/gpu-recorder-rs
 ```
 

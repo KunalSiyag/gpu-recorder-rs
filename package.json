@@ -1,6 +1,6 @@
 {
   "name": "hypergsr",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Native Linux screen recorder with cursor-following auto-zoom, GPU encoding, and a GTK4 Dynamic Island",
   "license": "MIT",
   "author": "Kunal Siyag",
