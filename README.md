@@ -6,6 +6,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/KunalSiyag/gpu-recorder-rs/ci.yml?branch=main&style=flat-square&label=CI&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/KunalSiyag/gpu-recorder-rs?style=flat-square&color=3fb950&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)
+[![npm](https://img.shields.io/npm/v/hypergsr?style=flat-square&color=cb3837&labelColor=262626)](https://www.npmjs.com/package/hypergsr)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1a1?style=flat-square&labelColor=262626)](LICENSE)
 [![Rust 2021](https://img.shields.io/badge/rust-2021-a1a1a1?style=flat-square&logo=rust&labelColor=262626)](https://www.rust-lang.org/)
 [![Stars](https://img.shields.io/github/stars/KunalSiyag/gpu-recorder-rs?style=flat-square&color=a1a1a1&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/stargazers)
@@ -109,8 +110,7 @@ Measured during a 1080p60 recording on a hybrid AMD Radeon + NVIDIA RTX 3050 lap
 
 ### npm / npx (Linux x86-64, glibc)
 
-The `hypergsr` npm package is prepared in this repository but is **not published yet**.
-Once published:
+HyperGSR is published on npm as [`hypergsr`](https://www.npmjs.com/package/hypergsr):
 
 ```bash
 npx hypergsr --report
@@ -123,8 +123,9 @@ hypergsr --web
 
 The package bundles the native recorder, PipeWire capture helper, and UI icons.
 It needs Node.js 22+ and a Linux x86-64 desktop with glibc. It does not support
-macOS, Windows, ARM, or Alpine/musl. Official bundles are built on Ubuntu 24.04;
-older distributions may have incompatible glibc or GTK versions.
+macOS, Windows, ARM, or Alpine/musl. The bundled binaries need glibc 2.39 or newer
+(Ubuntu 24.04+, Fedora 40+, or similar); older distributions should use the build
+from source instructions below.
 
 You still need **GTK 4.10+, gtk4-layer-shell, libdrm, X11 libraries, PipeWire,
 libportal, FFmpeg, and an XDG desktop portal**. See the distro dependency instructions
