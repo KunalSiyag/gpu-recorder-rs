@@ -30,6 +30,7 @@ fn print_banner(state: &SharedStudioState) {
 
 fn find_layer_shell_library() -> Option<PathBuf> {
     [
+        "/app/lib",
         "/usr/local/lib/x86_64-linux-gnu",
         "/usr/local/lib64",
         "/usr/local/lib",
@@ -64,7 +65,7 @@ fn main() -> anyhow::Result<()> {
             .env("GDK_BACKEND", "wayland")
             .env("GSK_RENDERER", "cairo");
         // gtk4-layer-shell must be loaded before libwayland-client, so it is preloaded
-        // from wherever the distro (or a /usr/local source build) installed it.
+        // from wherever the distro, a /usr/local source build, or Flatpak installed it.
         if let Some(layer_so) = find_layer_shell_library() {
             let preload = match std::env::var("LD_PRELOAD") {
                 Ok(existing) if !existing.is_empty() => {

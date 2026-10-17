@@ -1,6 +1,7 @@
 # Maintainer: Kunal Siyag <kunalsiyag at rediffmail dot com>
 pkgname=hypergsr-git
 _pkgname=hypergsr
+_appid=io.github.KunalSiyag.gpu_recorder_rs
 pkgver=1.1.0.r0.ga610b00
 pkgrel=1
 pkgdesc="Screen recorder for Linux Wayland whose camera follows your cursor (git version)"
@@ -48,7 +49,8 @@ package() {
   ln -s gpu-recorder-rs "${pkgdir}/usr/bin/${_pkgname}"
   install -Dm755 hypergsr-pw-capture "${pkgdir}/usr/lib/${_pkgname}/hypergsr-pw-capture"
   install -Dm644 -t "${pkgdir}/usr/share/${_pkgname}/assets" assets/hypergsr-logo.svg assets/icon-*.svg
-  install -Dm644 assets/hypergsr-logo.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${_pkgname}.svg"
-  install -Dm644 assets/hypergsr.desktop "${pkgdir}/usr/share/applications/${_pkgname}.desktop"
+  install -Dm644 assets/hypergsr-logo.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${_appid}.svg"
+  install -Dm644 "assets/${_appid}.desktop" -t "${pkgdir}/usr/share/applications"
+  install -Dm644 "assets/${_appid}.metainfo.xml" -t "${pkgdir}/usr/share/metainfo"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }

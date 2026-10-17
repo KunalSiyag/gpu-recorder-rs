@@ -33,13 +33,27 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
+/// XDG base directory, ignoring relative values as the spec requires. Flatpak
+/// points these at `~/.var/app/<id>/`, which is writable inside the sandbox.
+fn xdg_base(value: Option<std::ffi::OsString>, home: &Path, fallback: &str) -> PathBuf {
+    value
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| home_dir().join(".local/share"))
-        .join("hypergsr")
-        .join(env!("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|| home.join(fallback))
+}
+
+pub fn config_dir() -> PathBuf {
+    xdg_base(std::env::var_os("XDG_CONFIG_HOME"), &home_dir(), ".config").join("hypergsr")
+}
+
+fn data_dir() -> PathBuf {
+    xdg_base(
+        std::env::var_os("XDG_DATA_HOME"),
+        &home_dir(),
+        ".local/share",
+    )
+    .join("hypergsr")
+    .join(env!("CARGO_PKG_VERSION"))
 }
 
 fn materialize(relative: &Path, bytes: &[u8], mode: u32) -> Option<PathBuf> {
@@ -90,6 +104,23 @@ mod tests {
         let again = materialize_in(&base, Path::new("bin/helper"), b"#!/bin/sh\n", 0o755);
         assert_eq!(again.as_deref(), Some(path.as_path()));
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn xdg_base_ignores_missing_and_relative_values() {
+        let home = Path::new("/home/me");
+        assert_eq!(
+            xdg_base(Some("/home/me/.var/app/x/config".into()), home, ".config"),
+            PathBuf::from("/home/me/.var/app/x/config")
+        );
+        assert_eq!(
+            xdg_base(Some("relative".into()), home, ".config"),
+            PathBuf::from("/home/me/.config")
+        );
+        assert_eq!(
+            xdg_base(None, home, ".local/share"),
+            PathBuf::from("/home/me/.local/share")
+        );
     }
 
     #[test]

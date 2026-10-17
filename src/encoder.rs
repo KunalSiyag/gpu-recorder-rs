@@ -145,7 +145,7 @@ impl ActiveEncoderSession {
 
     fn ensure_portal_restore_token_file() -> Result<PathBuf> {
         let home = crate::bundled::home_dir();
-        let config_dir = home.join(".config/hypergsr");
+        let config_dir = crate::bundled::config_dir();
         std::fs::create_dir_all(&config_dir)?;
         let hypergsr_token = config_dir.join("restore_token");
         let legacy_token = home

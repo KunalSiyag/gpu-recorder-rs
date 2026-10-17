@@ -15,7 +15,8 @@ include = [
     "/build.rs",
     "/assets/hypergsr-logo.svg",
     "/assets/icon-*.svg",
-    "/assets/hypergsr.desktop",
+    "/assets/io.github.KunalSiyag.gpu_recorder_rs.desktop",
+    "/assets/io.github.KunalSiyag.gpu_recorder_rs.metainfo.xml",
     "/README.md",
     "/LICENSE",
 ]

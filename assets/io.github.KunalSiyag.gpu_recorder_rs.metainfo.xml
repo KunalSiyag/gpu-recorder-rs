@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.KunalSiyag.gpu_recorder_rs</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>HyperGSR</name>
+  <summary>Screen recorder whose camera follows your cursor</summary>
+  <developer id="io.github.kunalsiyag">
+    <name>Kunal Siyag</name>
+  </developer>
+  <description>
+    <p>
+      HyperGSR records your Linux desktop and zooms in on whatever you are working on,
+      like a camera operator following the cursor. It reads the cursor position from the
+      GPU's hardware cursor plane, so tracking keeps working on native Wayland windows.
+    </p>
+    <ul>
+      <li>Spring-physics auto-zoom that settles in when the cursor rests and pulls back during fast travel</li>
+      <li>Custom zoom triggers: keys, mouse buttons, shake, or double-click</li>
+      <li>Hardware encoding with NVIDIA NVENC or VAAPI, with an x264 fallback</li>
+      <li>Screen capture through PipeWire and the desktop portal, asking for permission once</li>
+      <li>A compact Dynamic Island control bar with dark and light themes, plus a local Web Studio</li>
+    </ul>
+    <p>
+      The docked control bar needs a compositor with the wlr-layer-shell protocol, such as
+      KDE Plasma, COSMIC, Hyprland, or Sway. Recordings are saved to your Videos folder.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.KunalSiyag.gpu_recorder_rs.desktop</launchable>
+  <provides>
+    <binary>hypergsr</binary>
+  </provides>
+  <url type="homepage">https://kunalsiyag.github.io/gpu-recorder-rs/</url>
+  <url type="bugtracker">https://github.com/KunalSiyag/gpu-recorder-rs/issues</url>
+  <url type="vcs-browser">https://github.com/KunalSiyag/gpu-recorder-rs</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Dynamic Island and Studio panel in the dark theme</caption>
+      <image>https://raw.githubusercontent.com/KunalSiyag/gpu-recorder-rs/v1.2.0/assets/island_dark_studio.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Light theme</caption>
+      <image>https://raw.githubusercontent.com/KunalSiyag/gpu-recorder-rs/v1.2.0/assets/island_light_studio.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <releases>
+    <release version="1.2.0" date="2026-10-17">
+      <description>
+        <p>Desktop integration: an app menu entry for npm installs, a Flatpak bundle, and an app ID shared by all install methods.</p>
+      </description>
+    </release>
+    <release version="1.1.0" date="2026-10-17">
+      <description>
+        <p>More accurate cursor tracking and packages that run outside a source checkout.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-10-16"/>
+  </releases>
+</component>

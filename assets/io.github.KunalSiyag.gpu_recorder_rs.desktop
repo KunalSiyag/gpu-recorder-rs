@@ -1,10 +1,12 @@
 [Desktop Entry]
+Type=Application
 Name=HyperGSR
 GenericName=Screen Recorder
 Comment=GPU screen recorder with cursor-following auto-zoom
 Exec=hypergsr
-Icon=hypergsr
+Icon=io.github.KunalSiyag.gpu_recorder_rs
 Terminal=false
-Type=Application
+StartupNotify=true
+StartupWMClass=io.github.KunalSiyag.gpu_recorder_rs
 Categories=AudioVideo;Recorder;Video;
 Keywords=screencast;screen;recorder;wayland;

@@ -47,7 +47,7 @@ fn asset_path(name: &str) -> PathBuf {
 
 pub fn launch_gtk_ui(state: SharedStudioState, _web_port: u16) {
     let app = Application::builder()
-        .application_id("com.factoryai.hypergsr.island")
+        .application_id("io.github.KunalSiyag.gpu_recorder_rs")
         .build();
 
     app.connect_activate(move |app| {
