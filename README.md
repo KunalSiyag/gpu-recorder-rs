@@ -140,7 +140,7 @@ To build and try the package locally, install the native build dependencies belo
 ```bash
 npm test
 npm pack
-npm install -g ./hypergsr-1.0.0.tgz --ignore-scripts
+npm install -g ./hypergsr-1.0.1.tgz --ignore-scripts
 hypergsr --report
 ```
 
