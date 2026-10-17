@@ -1,6 +1,6 @@
 [package]
 name = "gpu-recorder-rs"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
@@ -9,6 +9,16 @@ homepage = "https://kunalsiyag.github.io/gpu-recorder-rs/"
 keywords = ["screen-recorder", "wayland", "pipewire", "gpu", "gtk4"]
 categories = ["multimedia::video", "gui", "os::linux-apis"]
 description = "Screen recorder for Linux Wayland whose camera follows your cursor: rootless DRM cursor tracking, spring-physics auto-zoom, NVENC/VAAPI encoding"
+# Keep the crate to the sources and the files compiled into the binary.
+include = [
+    "/src/**/*",
+    "/build.rs",
+    "/assets/hypergsr-logo.svg",
+    "/assets/icon-*.svg",
+    "/assets/hypergsr.desktop",
+    "/README.md",
+    "/LICENSE",
+]
 
 [[bin]]
 name = "gpu-recorder-rs"

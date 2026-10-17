@@ -12,7 +12,7 @@
 [![Stars](https://img.shields.io/github/stars/KunalSiyag/gpu-recorder-rs?style=flat-square&color=a1a1a1&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/stargazers)
 
 **[Website](https://kunalsiyag.github.io/gpu-recorder-rs/)** ·
-**[Download v1.0.0](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)** ·
+**[Download v1.1.0](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)** ·
 **[Promo video (10 s, 1080p60)](https://kunalsiyag.github.io/gpu-recorder-rs/hypergsr-promo-1080p60.mp4)** ·
 **[How it works](#how-it-works)** ·
 **[Write-up on DEV](https://dev.to/kunalsiyag/cursor-following-auto-zoom-on-linux-wayland-reading-the-cursor-from-the-gpu-in-rust-4nij)** ·
@@ -140,7 +140,7 @@ To build and try the package locally, install the native build dependencies belo
 ```bash
 npm test
 npm pack
-npm install -g ./hypergsr-1.0.1.tgz --ignore-scripts
+npm install -g ./hypergsr-1.1.0.tgz --ignore-scripts
 hypergsr --report
 ```
 
@@ -153,10 +153,10 @@ artifact for distribution rather than binaries built on a newer distro.
 
 ### Prebuilt binary (x86_64)
 
-Download `hypergsr-v1.0.0-linux-x86_64.tar.gz` from the [latest release](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest), then:
+Download `hypergsr-v1.1.0-linux-x86_64.tar.gz` from the [latest release](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest), then:
 
 ```bash
-tar xzf hypergsr-v1.0.0-linux-x86_64.tar.gz
+tar xzf hypergsr-v1.1.0-linux-x86_64.tar.gz
 ./target/release/gpu-recorder-rs
 ```
 
@@ -215,6 +215,16 @@ sudo pacman -S --needed \
 cargo build --release
 ./target/release/gpu-recorder-rs
 ```
+
+With the same dependencies installed, you can also install it from crates.io:
+
+```bash
+cargo install gpu-recorder-rs
+gpu-recorder-rs
+```
+
+The build compiles the PipeWire capture helper into the binary. On first use it is unpacked to
+`~/.local/share/hypergsr/<version>/`, along with the UI icons.
 
 ## Usage
 
