@@ -67,8 +67,7 @@ impl StudioState {
             .join("recordings");
         std::fs::create_dir_all(&output_dir).ok();
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kunalsiyag".to_string());
-        let videos_dir = PathBuf::from(format!("{home}/Videos"));
+        let videos_dir = crate::bundled::home_dir().join("Videos");
         std::fs::create_dir_all(&videos_dir).ok();
 
         Self {
@@ -226,6 +225,16 @@ impl StudioState {
     fn poll_live_input(&self, now_ms: u64) -> (f32, f32, crate::cursor::SystemInputState) {
         if let Some((px, py, inp)) = self.cursor_tracker.poll_system_input() {
             return (px, py, inp);
+        }
+        if self.cursor_tracker.has_live_source() {
+            // A real pointer source is open but has no position yet (or X11 failed this tick):
+            // keep the camera still rather than inventing motion in a real recording.
+            let (x, y) = self
+                .cursor_tracker
+                .latest()
+                .map(|s| (s.raw_x, s.raw_y))
+                .unwrap_or((0.5, 0.5));
+            return (x, y, Default::default());
         }
         let t = now_ms as f32 / 1000.0;
         let x = 0.5 + 0.25 * (t * 0.6).cos();

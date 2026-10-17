@@ -131,16 +131,62 @@ struct DrmModePropertyRes {
     blob_ids: *mut u32,
 }
 
+/// Leading fields of libdrm's `drmModeCrtc`; only these are read, through the pointer libdrm owns.
+#[repr(C)]
+struct DrmModeCrtc {
+    crtc_id: u32,
+    buffer_id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    mode_valid: c_int,
+}
+
+const FALLBACK_CRTC_SIZE: (f32, f32) = (1920.0, 1080.0);
+
+/// Maps the cursor plane's top-left corner (`CRTC_X`/`CRTC_Y`) plus the hotspot to the
+/// pointer tip, normalized to the CRTC the plane is scanned out on.
+fn cursor_tip_normalized(
+    crtc_x: i32,
+    crtc_y: i32,
+    hotspot: (i32, i32),
+    crtc_size: (f32, f32),
+) -> (f32, f32) {
+    let w = crtc_size.0.max(1.0);
+    let h = crtc_size.1.max(1.0);
+    (
+        ((crtc_x + hotspot.0) as f32 / w).clamp(0.0, 1.0),
+        ((crtc_y + hotspot.1) as f32 / h).clamp(0.0, 1.0),
+    )
+}
+
+/// Last pointer position seen on a cursor plane. Compositors detach the plane (`FB_ID = 0`)
+/// when the cursor is hidden or drawn in software, and the pointer has not moved away then.
+#[derive(Debug, Default)]
+struct HeldPosition(Option<(f32, f32)>);
+
+impl HeldPosition {
+    fn observe(&mut self, visible: Option<(f32, f32)>) -> Option<(f32, f32)> {
+        if visible.is_some() {
+            self.0 = visible;
+        }
+        self.0
+    }
+}
+
 struct DrmCursorReader {
     fd: c_int,
     plane_ids: Vec<u32>,
-    screen_w: f32,
-    screen_h: f32,
     prev_fb_id: std::sync::atomic::AtomicU64,
+    held: parking_lot::Mutex<HeldPosition>,
+    crtc_size_cache: parking_lot::Mutex<Option<(u32, (f32, f32))>>,
     get_obj_props: unsafe extern "C" fn(c_int, u32, u32) -> *mut DrmModeObjectProperties,
     free_obj_props: unsafe extern "C" fn(*mut DrmModeObjectProperties),
     get_prop: unsafe extern "C" fn(c_int, u32) -> *mut DrmModePropertyRes,
     free_prop: unsafe extern "C" fn(*mut DrmModePropertyRes),
+    get_crtc: Option<unsafe extern "C" fn(c_int, u32) -> *mut DrmModeCrtc>,
+    free_crtc: Option<unsafe extern "C" fn(*mut DrmModeCrtc)>,
 }
 
 unsafe impl Send for DrmCursorReader {}
@@ -167,12 +213,15 @@ impl DrmCursorReader {
             let free_obj_props_ptr = sym("drmModeFreeObjectProperties");
             let get_prop_ptr = sym("drmModeGetProperty");
             let free_prop_ptr = sym("drmModeFreeProperty");
+            let get_crtc_ptr = sym("drmModeGetCrtc");
+            let free_crtc_ptr = sym("drmModeFreeCrtc");
 
             if set_cap_ptr.is_null()
                 || get_planes_ptr.is_null()
                 || get_obj_props_ptr.is_null()
                 || free_obj_props_ptr.is_null()
                 || get_prop_ptr.is_null()
+                || free_prop_ptr.is_null()
             {
                 return None;
             }
@@ -192,6 +241,20 @@ impl DrmCursorReader {
                 std::mem::transmute(get_prop_ptr);
             let free_prop: unsafe extern "C" fn(*mut DrmModePropertyRes) =
                 std::mem::transmute(free_prop_ptr);
+            let (get_crtc, free_crtc) = if get_crtc_ptr.is_null() || free_crtc_ptr.is_null() {
+                (None, None)
+            } else {
+                (
+                    Some(std::mem::transmute::<
+                        *mut c_void,
+                        unsafe extern "C" fn(c_int, u32) -> *mut DrmModeCrtc,
+                    >(get_crtc_ptr)),
+                    Some(std::mem::transmute::<
+                        *mut c_void,
+                        unsafe extern "C" fn(*mut DrmModeCrtc),
+                    >(free_crtc_ptr)),
+                )
+            };
 
             for card_path in ["/dev/dri/card1", "/dev/dri/card0"] {
                 let cpath = CString::new(card_path).ok()?;
@@ -249,13 +312,15 @@ impl DrmCursorReader {
                     return Some(Self {
                         fd,
                         plane_ids: cursor_planes,
-                        screen_w: 1920.0,
-                        screen_h: 1080.0,
                         prev_fb_id: std::sync::atomic::AtomicU64::new(0),
+                        held: parking_lot::Mutex::new(HeldPosition::default()),
+                        crtc_size_cache: parking_lot::Mutex::new(None),
                         get_obj_props,
                         free_obj_props,
                         get_prop,
                         free_prop,
+                        get_crtc,
+                        free_crtc,
                     });
                 }
                 libc::close(fd);
@@ -264,7 +329,37 @@ impl DrmCursorReader {
         }
     }
 
+    fn crtc_size(&self, crtc_id: u32) -> (f32, f32) {
+        let mut cache = self.crtc_size_cache.lock();
+        if let Some((cached_id, size)) = *cache {
+            if cached_id == crtc_id {
+                return size;
+            }
+        }
+        let (Some(get_crtc), Some(free_crtc)) = (self.get_crtc, self.free_crtc) else {
+            return FALLBACK_CRTC_SIZE;
+        };
+        let size = unsafe {
+            let crtc = get_crtc(self.fd, crtc_id);
+            if crtc.is_null() {
+                return FALLBACK_CRTC_SIZE;
+            }
+            let size = ((*crtc).width as f32, (*crtc).height as f32);
+            free_crtc(crtc);
+            size
+        };
+        if size.0 < 1.0 || size.1 < 1.0 {
+            return FALLBACK_CRTC_SIZE;
+        }
+        *cache = Some((crtc_id, size));
+        size
+    }
+
+    /// Returns the pointer position, holding the last known one while no cursor plane has a
+    /// framebuffer attached. Returns `None` only before any position has been seen.
     fn query_cursor(&self) -> Option<(f32, f32, bool)> {
+        let mut visible = None;
+        let mut cursor_shape_changed = false;
         unsafe {
             for &pid in &self.plane_ids {
                 let props = (self.get_obj_props)(self.fd, pid, 0xeeeeeeee);
@@ -273,8 +368,10 @@ impl DrmCursorReader {
                 }
                 let pcount = (*props).count_props as usize;
                 let mut fb_id = 0u64;
+                let mut crtc_id = 0u32;
                 let mut crtc_x: Option<i32> = None;
                 let mut crtc_y: Option<i32> = None;
+                let mut hotspot = (0i32, 0i32);
 
                 for j in 0..pcount {
                     let prop_id = *(*props).props.add(j);
@@ -283,12 +380,20 @@ impl DrmCursorReader {
                     if !pr.is_null() {
                         let name_bytes =
                             std::slice::from_raw_parts((*pr).name.as_ptr() as *const u8, 32);
+                        // Signed plane properties are stored as sign-extended 64-bit values.
+                        let signed = (pval as u32) as i32;
                         if name_bytes.starts_with(b"FB_ID\0") {
                             fb_id = pval;
+                        } else if name_bytes.starts_with(b"CRTC_ID\0") {
+                            crtc_id = pval as u32;
                         } else if name_bytes.starts_with(b"CRTC_X\0") {
-                            crtc_x = Some((pval as u32) as i32);
+                            crtc_x = Some(signed);
                         } else if name_bytes.starts_with(b"CRTC_Y\0") {
-                            crtc_y = Some((pval as u32) as i32);
+                            crtc_y = Some(signed);
+                        } else if name_bytes.starts_with(b"HOTSPOT_X\0") {
+                            hotspot.0 = signed;
+                        } else if name_bytes.starts_with(b"HOTSPOT_Y\0") {
+                            hotspot.1 = signed;
                         }
                         (self.free_prop)(pr);
                     }
@@ -297,21 +402,25 @@ impl DrmCursorReader {
 
                 if fb_id != 0 {
                     if let (Some(cx), Some(cy)) = (crtc_x, crtc_y) {
-                        let nx = (cx as f32 / self.screen_w).clamp(0.0, 1.0);
-                        let ny = (cy as f32 / self.screen_h).clamp(0.0, 1.0);
+                        let size = if crtc_id != 0 {
+                            self.crtc_size(crtc_id)
+                        } else {
+                            FALLBACK_CRTC_SIZE
+                        };
+                        visible = Some(cursor_tip_normalized(cx, cy, hotspot, size));
                         let old_fb = self
                             .prev_fb_id
                             .swap(fb_id, std::sync::atomic::Ordering::Relaxed);
-                        let cursor_shape_changed = old_fb != 0 && old_fb != fb_id;
-                        return Some((nx, ny, cursor_shape_changed));
+                        cursor_shape_changed = old_fb != 0 && old_fb != fb_id;
+                        break;
                     }
                 }
             }
-            None
         }
+        let (nx, ny) = self.held.lock().observe(visible)?;
+        Some((nx, ny, cursor_shape_changed))
     }
 }
-
 impl Drop for DrmCursorReader {
     fn drop(&mut self) {
         unsafe {
@@ -500,6 +609,11 @@ impl CursorTracker {
             }
         }
         self.x11_conn.as_ref().and_then(|x| x.query_pointer_and_keys())
+    }
+
+    /// Whether a real pointer source (DRM cursor plane or X11) was opened.
+    pub fn has_live_source(&self) -> bool {
+        self.drm_cursor.is_some() || self.x11_conn.is_some()
     }
 
     pub fn poll_system_pointer(&self) -> Option<(f32, f32, bool, bool)> {
@@ -730,5 +844,49 @@ impl CursorTracker {
         } else {
             now_ms.saturating_sub(self.last_motion_ms)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cursor_tip_normalized, HeldPosition};
+
+    #[test]
+    fn cursor_tip_uses_crtc_size_instead_of_1080p() {
+        let (x, y) = cursor_tip_normalized(1280, 720, (0, 0), (2560.0, 1440.0));
+        assert!((x - 0.5).abs() < 1e-6);
+        assert!((y - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cursor_tip_adds_hotspot_to_plane_origin() {
+        let (x, y) = cursor_tip_normalized(100, 200, (12, 12), (1000.0, 1000.0));
+        assert!((x - 0.112).abs() < 1e-6);
+        assert!((y - 0.212).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cursor_tip_clamps_planes_partly_off_screen() {
+        assert_eq!(
+            cursor_tip_normalized(-8, -8, (0, 0), (1920.0, 1080.0)),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            cursor_tip_normalized(1950, 1100, (0, 0), (1920.0, 1080.0)),
+            (1.0, 1.0)
+        );
+        // A hotspot can bring a plane that starts off-screen back onto it.
+        let (x, _) = cursor_tip_normalized(-4, 0, (14, 0), (1000.0, 1000.0));
+        assert!((x - 0.01).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hidden_cursor_holds_last_visible_position() {
+        let mut held = HeldPosition::default();
+        assert_eq!(held.observe(None), None);
+        assert_eq!(held.observe(Some((0.25, 0.75))), Some((0.25, 0.75)));
+        assert_eq!(held.observe(None), Some((0.25, 0.75)));
+        assert_eq!(held.observe(None), Some((0.25, 0.75)));
+        assert_eq!(held.observe(Some((0.5, 0.5))), Some((0.5, 0.5)));
     }
 }
