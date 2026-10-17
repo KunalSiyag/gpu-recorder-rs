@@ -6,6 +6,12 @@
 /*.tgz
 /node_modules/
 
+# makepkg working files for the AUR packages
+/packaging/aur/*/src/
+/packaging/aur/*/pkg/
+/packaging/aur/*/hypergsr/
+/packaging/aur/*/*.tar.*
+
 # Local test recordings & temporary captures
 /recordings/
 *.mp4

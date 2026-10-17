@@ -25,15 +25,32 @@ pub struct PipelineStageComparison {
     pub upgraded_rust_behavior: String,
 }
 
+/// Locates the `files/` directory of the gpu-screen-recorder Flatpak (user install first).
+fn find_gsr_flatpak_files() -> String {
+    let app = "app/com.dec05eba.gpu_screen_recorder";
+    let roots = [
+        crate::bundled::home_dir().join(".local/share/flatpak"),
+        std::path::PathBuf::from("/var/lib/flatpak"),
+    ];
+    let mut candidates = Vec::new();
+    for root in &roots {
+        let app_dir = root.join(app);
+        candidates.push(app_dir.join("current/active/files"));
+        if let Ok(entries) = std::fs::read_dir(app_dir.join("x86_64/stable")) {
+            candidates.extend(entries.flatten().map(|e| e.path().join("files")));
+        }
+    }
+    candidates
+        .iter()
+        .find(|dir| dir.join("bin/gpu-screen-recorder").exists())
+        .or(candidates.first())
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default()
+}
+
 impl GsrDecompiledReport {
     pub fn probe_system() -> Self {
-        let current_base = "/home/kunalsiyag/.local/share/flatpak/app/com.dec05eba.gpu_screen_recorder/current/active/files";
-        let legacy_base = "/home/kunalsiyag/.local/share/flatpak/app/com.dec05eba.gpu_screen_recorder/x86_64/stable/6f1120bd2356fcd67543acc4556e329d6b36e525decdb9adae329b821dded04e/files";
-        let flatpak_base = if Path::new(&format!("{current_base}/bin/gpu-screen-recorder")).exists() {
-            current_base
-        } else {
-            legacy_base
-        };
+        let flatpak_base = find_gsr_flatpak_files();
         let gsr_bin = format!("{flatpak_base}/bin/gpu-screen-recorder");
         let system_bridge = "/var/lib/flatpak/app/com.dec05eba.gpu_screen_recorder/current/active/files/bin/gsr-wayland-bridge";
 
@@ -138,7 +155,7 @@ impl GsrDecompiledReport {
         ];
 
         Self {
-            flatpak_path: flatpak_base.to_string(),
+            flatpak_path: flatpak_base,
             gsr_version,
             display_server,
             gpu_vendor,

@@ -1,0 +1,25 @@
+# Maintainer: Kunal Siyag <kunalsiyag at rediffmail dot com>
+pkgname=hypergsr-bin
+_pkgname=hypergsr
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Screen recorder for Linux Wayland whose camera follows your cursor (prebuilt)"
+arch=('x86_64')
+url="https://github.com/KunalSiyag/gpu-recorder-rs"
+license=('MIT')
+depends=('cairo' 'ffmpeg' 'gcc-libs' 'glib2' 'glibc' 'gtk4' 'gtk4-layer-shell' 'libdrm'
+         'libportal' 'libx11' 'pipewire' 'xdg-desktop-portal')
+provides=("${_pkgname}")
+conflicts=("${_pkgname}" "${_pkgname}-git")
+source=("${_pkgname}-v${pkgver}-linux-x86_64.tar.gz::${url}/releases/download/v${pkgver}/${_pkgname}-v${pkgver}-linux-x86_64.tar.gz")
+sha256sums=('SHA256_PLACEHOLDER')
+
+package() {
+  install -Dm755 target/release/gpu-recorder-rs "${pkgdir}/usr/bin/gpu-recorder-rs"
+  ln -s gpu-recorder-rs "${pkgdir}/usr/bin/${_pkgname}"
+  install -Dm755 bin/hypergsr-pw-capture "${pkgdir}/usr/lib/${_pkgname}/hypergsr-pw-capture"
+  install -Dm644 -t "${pkgdir}/usr/share/${_pkgname}/assets" assets/hypergsr-logo.svg assets/icon-*.svg
+  install -Dm644 assets/hypergsr-logo.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${_pkgname}.svg"
+  install -Dm644 assets/hypergsr.desktop "${pkgdir}/usr/share/applications/${_pkgname}.desktop"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

@@ -1,0 +1,54 @@
+# Maintainer: Kunal Siyag <kunalsiyag at rediffmail dot com>
+pkgname=hypergsr-git
+_pkgname=hypergsr
+pkgver=1.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Screen recorder for Linux Wayland whose camera follows your cursor (git version)"
+arch=('x86_64')
+url="https://github.com/KunalSiyag/gpu-recorder-rs"
+license=('MIT')
+depends=('cairo' 'ffmpeg' 'gcc-libs' 'glib2' 'glibc' 'gtk4' 'gtk4-layer-shell' 'libdrm'
+         'libportal' 'libx11' 'pipewire' 'xdg-desktop-portal')
+makedepends=('cargo' 'git' 'pkgconf')
+provides=("${_pkgname}")
+conflicts=("${_pkgname}" "${_pkgname}-bin")
+source=("${_pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${_pkgname}"
+  git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {
+  cd "${_pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${_pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+  # shellcheck disable=SC2046
+  ${CC:-cc} ${CFLAGS} src/pw_portal_capture.c -o hypergsr-pw-capture ${LDFLAGS} \
+    $(pkg-config --cflags --libs libpipewire-0.3 gio-2.0) -l:libportal.so.1 -lpthread
+}
+
+check() {
+  cd "${_pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen
+}
+
+package() {
+  cd "${_pkgname}"
+  install -Dm755 target/release/gpu-recorder-rs "${pkgdir}/usr/bin/gpu-recorder-rs"
+  ln -s gpu-recorder-rs "${pkgdir}/usr/bin/${_pkgname}"
+  install -Dm755 hypergsr-pw-capture "${pkgdir}/usr/lib/${_pkgname}/hypergsr-pw-capture"
+  install -Dm644 -t "${pkgdir}/usr/share/${_pkgname}/assets" assets/hypergsr-logo.svg assets/icon-*.svg
+  install -Dm644 assets/hypergsr-logo.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${_pkgname}.svg"
+  install -Dm644 assets/hypergsr.desktop "${pkgdir}/usr/share/applications/${_pkgname}.desktop"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

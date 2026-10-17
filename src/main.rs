@@ -1,3 +1,4 @@
+pub mod bundled;
 pub mod capture;
 pub mod compositor;
 pub mod cursor;
@@ -27,6 +28,20 @@ fn print_banner(state: &SharedStudioState) {
     println!("================================================================================");
 }
 
+fn find_layer_shell_library() -> Option<PathBuf> {
+    [
+        "/usr/local/lib/x86_64-linux-gnu",
+        "/usr/local/lib64",
+        "/usr/local/lib",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+    ]
+    .iter()
+    .map(|dir| PathBuf::from(dir).join("libgtk4-layer-shell.so.0"))
+    .find(|path| path.exists())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -43,14 +58,21 @@ fn main() -> anyhow::Result<()> {
     if !is_cli_mode && std::env::var("HYPERGSR_LAYER_SHELL").as_deref() != Ok("1") {
         use std::os::unix::process::CommandExt;
         let exe = std::env::current_exe()?;
-        let layer_so = "/usr/local/lib/x86_64-linux-gnu/libgtk4-layer-shell.so.0";
         let mut cmd = std::process::Command::new(exe);
         cmd.args(&args[1..])
             .env("HYPERGSR_LAYER_SHELL", "1")
             .env("GDK_BACKEND", "wayland")
             .env("GSK_RENDERER", "cairo");
-        if std::path::Path::new(layer_so).exists() {
-            cmd.env("LD_PRELOAD", layer_so);
+        // gtk4-layer-shell must be loaded before libwayland-client, so it is preloaded
+        // from wherever the distro (or a /usr/local source build) installed it.
+        if let Some(layer_so) = find_layer_shell_library() {
+            let preload = match std::env::var("LD_PRELOAD") {
+                Ok(existing) if !existing.is_empty() => {
+                    format!("{}:{existing}", layer_so.display())
+                }
+                _ => layer_so.display().to_string(),
+            };
+            cmd.env("LD_PRELOAD", preload);
         }
         let err = cmd.exec();
         anyhow::bail!("Failed to exec with layer-shell: {err}");

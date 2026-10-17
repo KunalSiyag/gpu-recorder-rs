@@ -19,21 +19,30 @@ use std::time::Duration;
 const ISLAND_WINDOW_TITLE: &str = "HyperGSR Dynamic Island";
 
 fn asset_path(name: &str) -> PathBuf {
+    let cwd_asset = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("assets")
+        .join(name);
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
     {
-        for base in [exe_dir.join("assets"), exe_dir.join("../../assets")] {
+        // npm bundle, system package (/usr/share/hypergsr), then a source checkout.
+        for base in [
+            exe_dir.join("assets"),
+            exe_dir.join("../share/hypergsr/assets"),
+            exe_dir.join("../../assets"),
+        ] {
             let candidate = base.join(name);
             if candidate.exists() {
                 return candidate;
             }
         }
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("assets")
-        .join(name)
+    if cwd_asset.exists() {
+        return cwd_asset;
+    }
+    crate::bundled::icon(name).unwrap_or(cwd_asset)
 }
 
 pub fn launch_gtk_ui(state: SharedStudioState, _web_port: u16) {

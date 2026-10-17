@@ -144,11 +144,11 @@ impl ActiveEncoderSession {
     }
 
     fn ensure_portal_restore_token_file() -> Result<PathBuf> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kunalsiyag".to_string());
-        let config_dir = PathBuf::from(&home).join(".config/hypergsr");
+        let home = crate::bundled::home_dir();
+        let config_dir = home.join(".config/hypergsr");
         std::fs::create_dir_all(&config_dir)?;
         let hypergsr_token = config_dir.join("restore_token");
-        let legacy_token = PathBuf::from(&home)
+        let legacy_token = home
             .join(".var/app/com.dec05eba.gpu_screen_recorder/config/gpu-screen-recorder/restore_token");
 
         if !hypergsr_token.exists() && legacy_token.exists() {
@@ -167,9 +167,11 @@ impl ActiveEncoderSession {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // npm installs the helper beside the recorder; source builds use bin/.
+        // npm installs the helper beside the recorder, system packages under lib/hypergsr,
+        // and source builds use bin/.
         let candidates = [
             exe_dir.join("hypergsr-pw-capture"),
+            exe_dir.join("../lib/hypergsr/hypergsr-pw-capture"),
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join("bin/hypergsr-pw-capture"),
@@ -179,6 +181,9 @@ impl ActiveEncoderSession {
             if cand.exists() {
                 return Ok(cand.clone());
             }
+        }
+        if let Some(embedded) = crate::bundled::pw_capture_helper() {
+            return Ok(embedded);
         }
 
         let bin_dir = std::env::current_dir()
@@ -191,7 +196,7 @@ impl ActiveEncoderSession {
             .join("src/pw_portal_capture.c");
         if src_c.exists() {
             let build_cmd = format!(
-                "gcc -O3 \"{}\" -o \"{}\" $(pkg-config --cflags --libs libpipewire-0.3 libspa-0.2 gio-2.0) /usr/lib/x86_64-linux-gnu/libportal.so.1 -lpthread",
+                "gcc -O3 \"{}\" -o \"{}\" $(pkg-config --cflags --libs libpipewire-0.3 libspa-0.2 gio-2.0) -l:libportal.so.1 -lpthread",
                 src_c.display(),
                 out_bin.display()
             );
