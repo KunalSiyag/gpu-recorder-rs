@@ -12,7 +12,7 @@ depends=('cairo' 'ffmpeg' 'gcc-libs' 'glib2' 'glibc' 'gtk4' 'gtk4-layer-shell' '
 provides=("${_pkgname}")
 conflicts=("${_pkgname}" "${_pkgname}-git")
 source=("${_pkgname}-v${pkgver}-linux-x86_64.tar.gz::${url}/releases/download/v${pkgver}/${_pkgname}-v${pkgver}-linux-x86_64.tar.gz")
-sha256sums=('SHA256_PLACEHOLDER')
+sha256sums=('d5f40dc3662653b06cf0a4227a1b9be61aff8ef9686fe5f4bb5949c6dbe524ee')
 
 package() {
   install -Dm755 target/release/gpu-recorder-rs "${pkgdir}/usr/bin/gpu-recorder-rs"

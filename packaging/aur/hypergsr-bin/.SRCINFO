@@ -1,0 +1,26 @@
+pkgbase = hypergsr-bin
+	pkgdesc = Screen recorder for Linux Wayland whose camera follows your cursor (prebuilt)
+	pkgver = 1.1.0
+	pkgrel = 1
+	url = https://github.com/KunalSiyag/gpu-recorder-rs
+	arch = x86_64
+	license = MIT
+	depends = cairo
+	depends = ffmpeg
+	depends = gcc-libs
+	depends = glib2
+	depends = glibc
+	depends = gtk4
+	depends = gtk4-layer-shell
+	depends = libdrm
+	depends = libportal
+	depends = libx11
+	depends = pipewire
+	depends = xdg-desktop-portal
+	provides = hypergsr
+	conflicts = hypergsr
+	conflicts = hypergsr-git
+	source = hypergsr-v1.1.0-linux-x86_64.tar.gz::https://github.com/KunalSiyag/gpu-recorder-rs/releases/download/v1.1.0/hypergsr-v1.1.0-linux-x86_64.tar.gz
+	sha256sums = d5f40dc3662653b06cf0a4227a1b9be61aff8ef9686fe5f4bb5949c6dbe524ee
+
+pkgname = hypergsr-bin

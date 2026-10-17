@@ -1,7 +1,7 @@
 # Maintainer: Kunal Siyag <kunalsiyag at rediffmail dot com>
 pkgname=hypergsr-git
 _pkgname=hypergsr
-pkgver=1.1.0.r0.g0000000
+pkgver=1.1.0.r0.ga610b00
 pkgrel=1
 pkgdesc="Screen recorder for Linux Wayland whose camera follows your cursor (git version)"
 arch=('x86_64')
