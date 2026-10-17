@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
-const { accessSync, constants } = require('node:fs');
-const { join } = require('node:path');
+const {
+  accessSync, constants, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+} = require('node:fs');
+const { homedir } = require('node:os');
+const { dirname, isAbsolute, join } = require('node:path');
 const { spawn } = require('node:child_process');
 const { version } = require('../package.json');
 
@@ -17,17 +20,88 @@ Usage: hypergsr [options]
   --export-demo [output.mp4] Render an auto-zoom showcase
   --help, -h                Show this help
   --version, -v             Print the package version
+  --install-desktop         Add HyperGSR to your app menu (current user only)
+  --uninstall-desktop       Remove the app menu entry and icon
 
 Requires Linux x86-64 with glibc, GTK >= 4.10, gtk4-layer-shell,
 libdrm, X11 libraries, PipeWire, libportal, FFmpeg, and a desktop portal.
 No Rust toolchain, sudo, or install-time downloads are used by this package.
 `;
 
+const appId = 'io.github.KunalSiyag.gpu_recorder_rs';
+
+function dataHome(env) {
+  if (env.XDG_DATA_HOME && isAbsolute(env.XDG_DATA_HOME)) return env.XDG_DATA_HOME;
+  return join(env.HOME || homedir(), '.local', 'share');
+}
+
+function desktopPaths(env) {
+  const data = dataHome(env);
+  return {
+    entry: join(data, 'applications', `${appId}.desktop`),
+    icon: join(data, 'icons', 'hicolor', 'scalable', 'apps', `${appId}.svg`),
+  };
+}
+
+// Desktop Entry spec: quote Exec arguments with reserved characters, then escape
+// backslashes once more because Exec is also a string value.
+function execArgument(path) {
+  if (/^[A-Za-z0-9_@+=:,./-]+$/.test(path)) return path;
+  const quoted = `"${path.replace(/["`$\\]/g, '\\$&')}"`;
+  return quoted.replace(/\\/g, '\\\\').replace(/%/g, '%%');
+}
+
+function desktopEntry(binary) {
+  return `[Desktop Entry]
+Type=Application
+Name=HyperGSR
+GenericName=Screen Recorder
+Comment=GPU screen recorder with cursor-following auto-zoom
+Exec=${execArgument(binary)}
+Icon=${appId}
+Terminal=false
+StartupNotify=true
+StartupWMClass=${appId}
+Categories=AudioVideo;Recorder;Video;
+Keywords=screencast;screen;recorder;wayland;
+`;
+}
+
+function writeAtomic(file, contents, mode) {
+  mkdirSync(dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, contents, { mode });
+  renameSync(temporary, file);
+}
+
+function installDesktop(directory, env) {
+  const binary = join(directory, 'gpu-recorder-rs');
+  const { entry, icon } = desktopPaths(env);
+  writeAtomic(icon, readFileSync(join(directory, 'assets', 'hypergsr-logo.svg')), 0o644);
+  writeAtomic(entry, desktopEntry(binary), 0o644);
+  console.log(`Added HyperGSR to your app menu:\n  ${entry}\n  ${icon}`);
+  console.log('The entry runs this installed copy. Run --install-desktop again after');
+  console.log('reinstalling HyperGSR under a different Node.js version or prefix.');
+}
+
+function uninstallDesktop(env) {
+  const { entry, icon } = desktopPaths(env);
+  let removed = false;
+  for (const file of [entry, icon]) {
+    if (existsSync(file)) {
+      rmSync(file, { force: true });
+      console.log(`Removed ${file}`);
+      removed = true;
+    }
+  }
+  if (!removed) console.log('No HyperGSR app menu entry was installed.');
+}
 function main({
   args = process.argv.slice(2),
   platform = process.platform,
   arch = process.arch,
   root = join(__dirname, '..'),
+  env = process.env,
 } = {}) {
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
     console.log(help);
@@ -35,6 +109,10 @@ function main({
   }
   if (args.length === 1 && ['--version', '-v'].includes(args[0])) {
     console.log(version);
+    return;
+  }
+  if (args.length === 1 && args[0] === '--uninstall-desktop') {
+    uninstallDesktop(env);
     return;
   }
   if (platform !== 'linux' || arch !== 'x64') {
@@ -52,6 +130,16 @@ function main({
     console.error('HyperGSR native binaries are missing or not executable. Reinstall the npm package.');
     console.error('From a source checkout, run npm run build:native first.');
     process.exitCode = 1;
+    return;
+  }
+
+  if (args.length === 1 && args[0] === '--install-desktop') {
+    try {
+      installDesktop(directory, env);
+    } catch (error) {
+      console.error(`Could not add the app menu entry: ${error.message}`);
+      process.exitCode = 1;
+    }
     return;
   }
 
@@ -89,4 +177,4 @@ function main({
 }
 
 if (require.main === module) main();
-module.exports = { main };
+module.exports = { appId, desktopEntry, execArgument, main };

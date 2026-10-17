@@ -2,12 +2,15 @@
 
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
-const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+const {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+} = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { version } = require('../package.json');
+const { appId, desktopEntry, execArgument } = require('./cli.cjs');
 
 const cli = join(__dirname, 'cli.cjs');
 
@@ -18,6 +21,8 @@ function fixture(t, source = 'console.log(JSON.stringify(process.argv.slice(2)))
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, 'gpu-recorder-rs'), `#!${process.execPath}\n${source}\n`, { mode: 0o755 });
   writeFileSync(join(directory, 'hypergsr-pw-capture'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  mkdirSync(join(directory, 'assets'));
+  writeFileSync(join(directory, 'assets', 'hypergsr-logo.svg'), '<svg/>');
   return root;
 }
 
@@ -134,4 +139,61 @@ test('forwards SIGTERM to the native app', { timeout: 10000 }, async (t) => {
   const [code, signal] = await exited;
   assert.equal(code, 23);
   assert.equal(signal, null);
+});
+
+test('--install-desktop adds a menu entry and icon for the installed binary', (t) => {
+  const root = fixture(t, 'console.log("native app must not start"); process.exit(9);');
+  const data = join(root, 'data home');
+  const result = spawnSync(process.execPath, command(root, ['--install-desktop'], {
+    env: { XDG_DATA_HOME: data, HOME: root },
+  }), { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /must not start/);
+  const entry = readFileSync(join(data, 'applications', `${appId}.desktop`), 'utf8');
+  const binary = join(root, 'native', 'linux-x64', 'gpu-recorder-rs');
+  assert.match(entry, /^\[Desktop Entry\]\nType=Application\n/);
+  assert.ok(entry.includes(`Exec=${execArgument(binary)}\n`));
+  assert.match(entry, new RegExp(`^Icon=${appId.replace(/\./g, '\\.')}$`, 'm'));
+  assert.match(entry, new RegExp(`^StartupWMClass=${appId.replace(/\./g, '\\.')}$`, 'm'));
+  const icon = join(data, 'icons', 'hicolor', 'scalable', 'apps', `${appId}.svg`);
+  assert.equal(readFileSync(icon, 'utf8'), '<svg/>');
+
+  const validator = spawnSync('desktop-file-validate', [join(data, 'applications', `${appId}.desktop`)], {
+    encoding: 'utf8',
+  });
+  if (!validator.error) assert.equal(validator.status, 0, validator.stdout + validator.stderr);
+
+  const removed = spawnSync(process.execPath, command(root, ['--uninstall-desktop'], {
+    env: { XDG_DATA_HOME: data, HOME: root },
+  }), { encoding: 'utf8', timeout: 10000 });
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.equal(existsSync(join(data, 'applications', `${appId}.desktop`)), false);
+  assert.equal(existsSync(icon), false);
+  const again = spawnSync(process.execPath, command(root, ['--uninstall-desktop'], {
+    env: { XDG_DATA_HOME: data, HOME: root },
+  }), { encoding: 'utf8', timeout: 10000 });
+  assert.equal(again.status, 0);
+  assert.match(again.stdout, /No HyperGSR app menu entry/);
+});
+
+test('--install-desktop falls back to ~/.local/share and needs the native bundle', (t) => {
+  const root = fixture(t);
+  const result = spawnSync(process.execPath, command(root, ['--install-desktop'], {
+    env: { HOME: root, XDG_DATA_HOME: 'relative/ignored' },
+  }), { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(existsSync(join(root, '.local', 'share', 'applications', `${appId}.desktop`)));
+
+  const missing = invoke('/missing-hypergsr', ['--install-desktop']);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /Reinstall the npm package/);
+});
+
+test('Exec paths with spaces and reserved characters are quoted', () => {
+  assert.equal(execArgument('/usr/lib/node_modules/hypergsr/native/linux-x64/gpu-recorder-rs'),
+    '/usr/lib/node_modules/hypergsr/native/linux-x64/gpu-recorder-rs');
+  assert.equal(execArgument('/home/me/My Apps/gpu-recorder-rs'), '"/home/me/My Apps/gpu-recorder-rs"');
+  assert.equal(execArgument('/a"b$c`d\\e'), '"/a\\\\"b\\\\$c\\\\`d\\\\\\\\e"');
+  assert.equal(execArgument('/100%/x'), '"/100%%/x"');
+  assert.match(desktopEntry('/opt/hypergsr'), /^Exec=\/opt\/hypergsr$/m);
 });

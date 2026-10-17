@@ -122,6 +122,19 @@ npm install -g hypergsr
 hypergsr --web
 ```
 
+To launch HyperGSR from your app menu like any other desktop app, add a menu entry
+and icon for your user after the global install:
+
+```bash
+hypergsr --install-desktop     # writes ~/.local/share/applications/io.github.KunalSiyag.gpu_recorder_rs.desktop
+hypergsr --uninstall-desktop   # removes the entry and icon again
+```
+
+The entry starts the native binary inside the installed package, so it keeps working
+without Node.js on the desktop's `PATH`. Run `--install-desktop` again if you reinstall
+HyperGSR under a different Node.js version or npm prefix. Run `--uninstall-desktop`
+before `npm uninstall -g hypergsr`.
+
 The package bundles the native recorder, PipeWire capture helper, and UI icons.
 It needs Node.js 22+ and a Linux x86-64 desktop with glibc. It does not support
 macOS, Windows, ARM, or Alpine/musl. The bundled binaries need glibc 2.39 or newer
