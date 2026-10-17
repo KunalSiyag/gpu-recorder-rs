@@ -1,0 +1,48 @@
+{
+  "name": "hypergsr",
+  "version": "1.0.0",
+  "description": "Native Linux screen recorder with cursor-following auto-zoom, GPU encoding, and a GTK4 Dynamic Island",
+  "license": "MIT",
+  "author": "Kunal Siyag",
+  "homepage": "https://kunalsiyag.github.io/gpu-recorder-rs/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KunalSiyag/gpu-recorder-rs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KunalSiyag/gpu-recorder-rs/issues"
+  },
+  "keywords": [
+    "screen-recorder",
+    "linux",
+    "wayland",
+    "auto-zoom",
+    "pipewire",
+    "gpu",
+    "hypergsr"
+  ],
+  "bin": {
+    "hypergsr": "npm/cli.cjs"
+  },
+  "files": [
+    "npm/cli.cjs",
+    "native/linux-x64/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "scripts": {
+    "build:native": "node npm/build-native.cjs",
+    "test": "node --test npm/*.test.cjs",
+    "prepack": "npm run build:native && node npm/check-package.cjs",
+    "prepublishOnly": "npm test"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -19,10 +19,16 @@ use std::time::Duration;
 const ISLAND_WINDOW_TITLE: &str = "HyperGSR Dynamic Island";
 
 fn asset_path(name: &str) -> PathBuf {
-    let base = PathBuf::from("/home/kunalsiyag/Ambassador/factoryai/gpu-recorder-rs/assets");
-    let candidate = base.join(name);
-    if candidate.exists() {
-        return candidate;
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+    {
+        for base in [exe_dir.join("assets"), exe_dir.join("../../assets")] {
+            let candidate = base.join(name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
     }
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))

@@ -1,6 +1,11 @@
 # Rust build artifacts
 /target/
 
+# Generated npm native bundles and tarballs
+/native/
+/*.tgz
+/node_modules/
+
 # Local test recordings & temporary captures
 /recordings/
 *.mp4

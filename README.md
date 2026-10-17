@@ -107,6 +107,49 @@ Measured during a 1080p60 recording on a hybrid AMD Radeon + NVIDIA RTX 3050 lap
 
 ## Install
 
+### npm / npx (Linux x86-64, glibc)
+
+The `hypergsr` npm package is prepared in this repository but is **not published yet**.
+Once published:
+
+```bash
+npx hypergsr --report
+npx hypergsr
+
+# Or install the CLI globally
+npm install -g hypergsr
+hypergsr --web
+```
+
+The package bundles the native recorder, PipeWire capture helper, and UI icons.
+It needs Node.js 22+ and a Linux x86-64 desktop with glibc. It does not support
+macOS, Windows, ARM, or Alpine/musl. Official bundles are built on Ubuntu 24.04;
+older distributions may have incompatible glibc or GTK versions.
+
+You still need **GTK 4.10+, gtk4-layer-shell, libdrm, X11 libraries, PipeWire,
+libportal, FFmpeg, and an XDG desktop portal**. See the distro dependency instructions
+below. npm does not install system packages, run `sudo`, compile Rust on the user's
+machine, or download binaries from GitHub during installation.
+
+All recorder arguments and environment variables are forwarded unchanged. Relative
+paths such as `hypergsr --export-demo ./demo.mp4` resolve from your current directory.
+
+To build and try the package locally, install the native build dependencies below, then:
+
+```bash
+npm test
+npm pack
+npm install -g ./hypergsr-1.0.0.tgz --ignore-scripts
+hypergsr --report
+```
+
+`npm pack` builds both native binaries from source using the locked Cargo dependencies,
+then checks the architecture, version, helper, and icons before creating the tarball.
+Only the launcher and native runtime files are shipped, alongside the package metadata,
+README, and license. `npm run build:native` builds the bundle without packing it.
+Keep the npm and Cargo versions in sync. Maintainers should use the Ubuntu 24.04 CI
+artifact for distribution rather than binaries built on a newer distro.
+
 ### Prebuilt binary (x86_64)
 
 Download `hypergsr-v1.0.0-linux-x86_64.tar.gz` from the [latest release](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest), then:

@@ -167,13 +167,13 @@ impl ActiveEncoderSession {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Candidate locations for bin/hypergsr-pw-capture
+        // npm installs the helper beside the recorder; source builds use bin/.
         let candidates = [
+            exe_dir.join("hypergsr-pw-capture"),
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join("bin/hypergsr-pw-capture"),
             exe_dir.join("../../bin/hypergsr-pw-capture"),
-            PathBuf::from("/home/kunalsiyag/Ambassador/factoryai/gpu-recorder-rs/bin/hypergsr-pw-capture"),
         ];
         for cand in &candidates {
             if cand.exists() {

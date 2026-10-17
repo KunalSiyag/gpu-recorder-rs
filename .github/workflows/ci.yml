@@ -10,6 +10,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  npm-tests:
+    name: npm launcher (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
   build-and-test:
     name: Build & Test (Ubuntu Wayland/GTK4)
     runs-on: ubuntu-24.04
@@ -51,5 +64,21 @@ jobs:
       - name: Run Unit Tests
         run: cargo test --verbose
 
-      - name: Build Release Binary
-        run: cargo build --release --verbose
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build Release Binary and npm Package
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+
+      - name: Smoke Test Installed npm Package
+        run: |
+          npm install --prefix "$RUNNER_TEMP/hypergsr-smoke" --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP"/hypergsr-*.tgz
+          cd "$RUNNER_TEMP"
+          ./hypergsr-smoke/node_modules/.bin/hypergsr --version
+          ./hypergsr-smoke/node_modules/.bin/hypergsr --report
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypergsr-npm-linux-x64
+          path: ${{ runner.temp }}/hypergsr-*.tgz
