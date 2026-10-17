@@ -5,10 +5,10 @@ edition = "2021"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/KunalSiyag/gpu-recorder-rs"
-homepage = "https://github.com/KunalSiyag/gpu-recorder-rs"
+homepage = "https://kunalsiyag.github.io/gpu-recorder-rs/"
 keywords = ["screen-recorder", "wayland", "pipewire", "gpu", "gtk4"]
 categories = ["multimedia::video", "gui", "os::linux-apis"]
-description = "Screen Studio for Linux Wayland in Native Rust — Zero-Copy PipeWire + NVENC/VAAPI GPU Screen Recorder with DRM Hardware Cursor Tracking, 240Hz Spring Auto-Zoom, and Dynamic Island UI"
+description = "Screen recorder for Linux Wayland whose camera follows your cursor: rootless DRM cursor tracking, spring-physics auto-zoom, NVENC/VAAPI encoding"
 
 [[bin]]
 name = "gpu-recorder-rs"

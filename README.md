@@ -1,121 +1,231 @@
 <div align="center">
 
-<img src="assets/hero-banner.svg" width="100%" alt="HyperGSR — Screen Studio for Linux Wayland in Native Rust" />
+<img src="assets/hero-banner.svg" width="100%" alt="HyperGSR: a screen recorder for Linux Wayland whose camera follows your cursor" />
 
 <br/>
 
-[![GitHub Stars](https://img.shields.io/github/stars/KunalSiyag/gpu-recorder-rs?style=for-the-badge&logo=github&color=F59E0B&labelColor=0F172A)](https://github.com/KunalSiyag/gpu-recorder-rs/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/KunalSiyag/gpu-recorder-rs?style=for-the-badge&logo=git&color=38BDF8&labelColor=0F172A)](https://github.com/KunalSiyag/gpu-recorder-rs/network/members)
-[![Release](https://img.shields.io/github/v/release/KunalSiyag/gpu-recorder-rs?style=for-the-badge&color=10B981&labelColor=0F172A)](https://github.com/KunalSiyag/gpu-recorder-rs/releases)
-[![Rust](https://img.shields.io/badge/Rust-Native_2021-F97316?style=for-the-badge&logo=rust&labelColor=0F172A)](https://www.rust-lang.org/)
-[![Wayland](https://img.shields.io/badge/Wayland-Layer--Shell_%2B_DRM-818CF8?style=for-the-badge&logo=wayland&labelColor=0F172A)](https://wayland.freedesktop.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge&labelColor=0F172A)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/KunalSiyag/gpu-recorder-rs/ci.yml?branch=main&style=flat-square&label=CI&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/KunalSiyag/gpu-recorder-rs?style=flat-square&color=3fb950&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-a1a1a1?style=flat-square&labelColor=262626)](LICENSE)
+[![Rust 2021](https://img.shields.io/badge/rust-2021-a1a1a1?style=flat-square&logo=rust&labelColor=262626)](https://www.rust-lang.org/)
+[![Stars](https://img.shields.io/github/stars/KunalSiyag/gpu-recorder-rs?style=flat-square&color=a1a1a1&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/stargazers)
 
-<p align="center">
-  <a href="#-15-second-quick-start"><b>⚡ 15-Second Install</b></a> •
-  <a href="#-live-auto-zoom--dynamic-island-tour"><b>🎬 Live Demo</b></a> •
-  <a href="#-custom-zoom-combinations--manual-camera-lock"><b>🎮 Custom Zoom Combos</b></a> •
-  <a href="#-how-rootless-wayland-auto-zoom-works"><b>🔬 Under the Hood</b></a> •
-  <a href="#-fork--hack-in-5-minutes"><b>🍴 Fork &amp; Extend</b></a> •
-  <a href="RE_ANALYSIS.md"><b>🕵️ Decompilation Report</b></a>
-</p>
-
-> **If you've ever wished macOS [Screen Studio](https://screen.studio) existed natively on Linux Wayland without Electron bloat — give HyperGSR a ⭐ Star and [🍴 Fork](https://github.com/KunalSiyag/gpu-recorder-rs/fork) it!**
+**[Website](https://kunalsiyag.github.io/gpu-recorder-rs/)** ·
+**[Download v1.0.0](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)** ·
+**[Promo video (10 s, 1080p60)](https://kunalsiyag.github.io/gpu-recorder-rs/hypergsr-promo-1080p60.mp4)** ·
+**[How it works](#how-it-works)** ·
+**[Contributing](CONTRIBUTING.md)**
 
 </div>
 
----
+HyperGSR (`gpu-recorder-rs`) is a screen recorder for Linux, written in Rust. It reads the cursor straight from the GPU's hardware cursor plane, without root, and moves a critically damped spring camera to wherever you are working, the way [Screen Studio](https://screen.studio) does on macOS. Capture goes through PipeWire and the XDG desktop portal, and encoding runs on NVENC or VAAPI.
 
-## ⚡ Why HyperGSR?
-
-Linux has great raw encoders (`gpu-screen-recorder`, `OBS`, `wf-recorder`), but none of them give you **Screen Studio-style cinematic cursor auto-zoom**, **customizable zoom gesture combos**, and a **non-intrusive Dynamic Island HUD** that works natively on **Wayland** (`COSMIC`, `GNOME`, `KDE Plasma`, `Hyprland`, `Sway`).
-
-Even worse: traditional Linux recorders try to track the mouse using `XQueryPointer` (`X11`), which **freezes or goes blind on native Wayland windows**.
-
-**HyperGSR (`gpu-recorder-rs`) solves all of this in `~56 MB` of native Rust + C:**
-
-- 🎯 **Rootless Wayland Global Cursor Tracking (`DRM Plane #92`)**: Reads hardware cursor plane coordinates (`CRTC_X`, `CRTC_Y`) and cursor shape changes (`FB_ID`) directly from `/dev/dri/card*` via `libdrm` at 60 Hz — **zero root privileges, zero XWayland freezes**.
-- 🎥 **240 Hz Critically-Damped Spring Auto-Zoom**: Smooth $C^2$ continuous virtual camera (`zoom_engine.rs`) with bounded Screen Studio trajectory planning, dwell hysteresis, and fast-pan pull-back so the camera **never gets stuck zoomed in**.
-- 🎮 **Self-Registering Custom Zoom Combos (`🎯 Record Combo…`)**: Trigger or lock zoom on demand using **Cursor Shake**, **Double-Click**, **Middle/Right Click**, **Mouse Side Buttons (`Mouse4`/`Mouse5`)**, **`Ctrl+Alt`**, **`Ctrl+Shift`**, **`Super+Z`**, or **Scroll Wheel** (`1.0×`–`3.2×`).
-- 🏝️ **Native Wayland Layer-Shell Dynamic Island (`zwlr_layer_shell_v1`)**: Docks cleanly at the top center of your screen with true 32-bit RGBA rounded corners, live cursor/zoom telemetry, and 1-click **Obsidian Dark (`🌙`)** & **Pearl Light (`☀️`)** themes.
-- 🚀 **100% Standalone PipeWire + XDG Desktop Portal + NVENC/VAAPI Capture**: Includes a standalone native PipeWire/Portal capture engine (`bin/hypergsr-pw-capture`) with persistent `restore_token` reuse (no repetitive permission popups) plus our reverse-engineered host-bridge fix for `gpu-screen-recorder` (`RE_ANALYSIS.md`).
+It runs on native Wayland (COSMIC, GNOME, KDE Plasma, Hyprland, Sway) and on X11.
 
 <div align="center">
-  <img src="assets/benchmark-card.svg" width="100%" alt="HyperGSR vs OBS vs Electron Benchmark" />
+  <img src="assets/demo-autozoom.gif" width="760" alt="Auto-zoom demo: the camera glides into the code under the cursor and pulls back out during fast travel" />
 </div>
 
----
+## Contents
 
-## 🎬 Live Auto-Zoom & Dynamic Island Tour
+- [What it does](#what-it-does)
+- [Screenshots](#screenshots)
+- [Measured footprint](#measured-footprint)
+- [Install](#install)
+- [Usage](#usage)
+- [Zoom triggers](#zoom-triggers)
+- [How it works](#how-it-works)
+- [Compared with other recorders](#compared-with-other-recorders)
+- [Project layout](#project-layout)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
 
-### 1. 60 FPS Spring-Physics Auto-Zoom & Cursor Ripple Showcase
-Watch the virtual camera automatically glide into active code, terminal metrics, and timeline controls with critically-damped spring physics ($\zeta = 1.0$) and return smoothly to `1.0×` wide view during cross-screen travel:
+## What it does
 
-<div align="center">
-  <img src="assets/demo-autozoom.gif" width="760" alt="HyperGSR 60 FPS Spring Auto-Zoom Demo" />
-</div>
+- **Tracks the cursor on Wayland without root.** Recorders that call `XQueryPointer` go blind or stall once a native Wayland window has focus. HyperGSR opens `/dev/dri/card*` through `libdrm` and reads `CRTC_X`, `CRTC_Y` and `FB_ID` from the hardware cursor plane at 60 Hz.
+- **Zooms like a camera operator.** A critically damped spring (ζ = 1.0) integrated at 240 Hz substeps moves the crop. Pause on something and the camera settles in; move fast and it pulls back to 1.0×, so it never gets stuck zoomed in.
+- **Lets you take over.** Bind your own zoom trigger (keys, mouse buttons, shake, double-click), lock the zoom, or dial depth from 1.0× to 3.2× with the scroll wheel.
+- **Stays out of the way.** The controls live in a small Dynamic Island docked to the top of the screen through `zwlr_layer_shell_v1`, with a dark and a light theme.
+- **Asks for screen permission once.** The bundled PipeWire/portal helper (`bin/hypergsr-pw-capture`) stores the portal `restore_token`, so later recordings skip the picker.
 
-### 2. Compact Top-Notch Dynamic Island Bar
-Stays out of your way while coding or presenting (`620×42 px`), showing real-time DRM cursor coordinates, active zoom multiplier (`1.0× Wide` / `2.0× Auto` / `🔒 Lock`), recording timer, and 1-click Studio toggle:
+## Screenshots
 
-<div align="center">
-  <img src="assets/island_compact_bar.png" width="760" alt="HyperGSR Compact Dynamic Island Bar" />
-</div>
+### Auto-zoom, before and after
 
-### 3. Expanded Bento Studio — Obsidian Dark (`🌙`) & Pearl Light (`☀️`)
-Click **`Studio ▾`** to open the live **16:9 Virtual Camera Radar**, **Spring S-Curve Telemetry**, **Custom Zoom Combo Recorder**, and **Camera Physics Presets**:
-
-| Obsidian Dark Mode (`🌙`) | Pearl Frosted Light Mode (`☀️`) |
+| 1.0× wide, cursor travelling | 2.0× auto, cursor resting |
 | :---: | :---: |
-| <img src="assets/island_dark_studio.png" width="460" alt="Obsidian Dark Studio" /> | <img src="assets/island_light_studio.png" width="460" alt="Pearl Light Studio" /> |
+| <img src="assets/screenshots/zoom-wide.png" width="440" alt="Recording at 1.0x while the cursor moves across the screen" /> | <img src="assets/screenshots/zoom-close.png" width="440" alt="Recording zoomed to 2.0x on the line under the resting cursor" /> |
 
----
+Both frames come from the same 60 FPS output of `--export-demo`.
 
-## 🎮 Custom Zoom Combinations & Manual Camera Lock
+### Dynamic Island
 
-Want full manual control over when and how deep the camera zooms during a live tutorial or product demo? HyperGSR gives you both **AI-like Smart Auto-Zoom** and **100% Manual Combo Control**:
+The compact bar shows the DRM cursor position, the current zoom (`1.0× Wide`, `2.0× Auto` or `Lock`), the recording timer and the Studio toggle.
 
-| Feature | How It Works |
+<div align="center">
+  <img src="assets/island_compact_bar.png" width="760" alt="Compact Dynamic Island bar docked at the top of the screen" />
+</div>
+
+Click **Studio** to open the live cursor camera, zoom-combo recorder, zoom depth and spring presets.
+
+| Dark | Light |
+| :---: | :---: |
+| <img src="assets/island_dark_studio.png" width="420" alt="Expanded Studio drawer, dark theme" /> | <img src="assets/island_light_studio.png" width="420" alt="Expanded Studio drawer, light theme" /> |
+
+### Web Studio
+
+`--web` serves a browser control panel on `http://127.0.0.1:7878` with the same camera, cursor effects, encoder choice and the `gpu-screen-recorder` inspector.
+
+<div align="center">
+  <img src="assets/screenshots/web-studio.png" width="100%" alt="Web Studio: live preview canvas with auto-zoom physics, cursor FX and encoder panels" />
+</div>
+
+### Website and in-browser workbench
+
+The [website](https://kunalsiyag.github.io/gpu-recorder-rs/) runs the same spring model in your browser, so you can try the camera before installing anything.
+
+| Light | Dark |
+| :---: | :---: |
+| <img src="assets/screenshots/site-light.png" width="440" alt="HyperGSR website hero, light theme" /> | <img src="assets/screenshots/site-dark.png" width="440" alt="HyperGSR website hero, dark theme" /> |
+
+<div align="center">
+  <img src="assets/screenshots/workbench.png" width="100%" alt="Website workbench: full-frame input on the left, spring camera output on the right, with live cursor, zoom and velocity readouts" />
+</div>
+
+## Measured footprint
+
+| Resident memory | CPU at 1080p60 | Cursor source | Camera solver |
+| :---: | :---: | :---: | :---: |
+| **56 MB** | **< 1.5 %** | DRM plane `#92` at 60 Hz | 240 Hz, ζ = 1.0 |
+
+Measured during a 1080p60 recording on a hybrid AMD Radeon + NVIDIA RTX 3050 laptop under COSMIC, with NVENC preset P4. Your numbers will depend on GPU, compositor and resolution. Run `gpu-recorder-rs --report` to see the encoders and cursor planes it finds on your machine.
+
+<div align="center">
+  <img src="assets/benchmark-card.svg" width="100%" alt="Memory and CPU compared with OBS Studio and Electron-based recorders" />
+</div>
+
+## Install
+
+### Prebuilt binary (x86_64)
+
+Download `hypergsr-v1.0.0-linux-x86_64.tar.gz` from the [latest release](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest), then:
+
+```bash
+tar xzf hypergsr-v1.0.0-linux-x86_64.tar.gz
+./target/release/gpu-recorder-rs
+```
+
+You still need the runtime libraries listed below (GTK 4, gtk4-layer-shell, libdrm, PipeWire, libportal, FFmpeg).
+
+### From source
+
+```bash
+git clone https://github.com/KunalSiyag/gpu-recorder-rs.git
+cd gpu-recorder-rs
+./install.sh
+```
+
+Or install the dependencies yourself and build with Cargo:
+
+<details>
+<summary><b>Dependencies by distro</b></summary>
+
+**Ubuntu 25.10+ / Debian 13:**
+
+```bash
+sudo apt update && sudo apt install -y \
+  build-essential pkg-config cargo rustc clang \
+  libgtk-4-dev libgtk4-layer-shell-dev libdrm-dev libx11-dev \
+  libpipewire-0.3-dev libportal-dev ffmpeg
+```
+
+**Ubuntu 24.04 / 25.04 / Pop!_OS 24.04:** `libgtk4-layer-shell-dev` isn't packaged before Ubuntu 25.10. Install everything above except that package, then build it from source, the same way CI does:
+
+```bash
+sudo apt install -y meson ninja-build libwayland-dev libwayland-bin wayland-protocols
+git clone --depth 1 --branch v1.3.0 https://github.com/wmww/gtk4-layer-shell.git
+cd gtk4-layer-shell
+meson setup build -Dexamples=false -Ddocs=false -Dtests=false -Dintrospection=false -Dvapi=false
+ninja -C build && sudo ninja -C build install && sudo ldconfig
+```
+
+**Fedora:**
+
+```bash
+sudo dnf install -y \
+  cargo rust gtk4-devel gtk4-layer-shell-devel libdrm-devel \
+  libX11-devel pipewire-devel libportal-devel ffmpeg
+```
+
+**Arch Linux:**
+
+```bash
+sudo pacman -S --needed \
+  rust gtk4 gtk4-layer-shell libdrm libx11 pipewire libportal ffmpeg
+```
+
+</details>
+
+```bash
+cargo build --release
+./target/release/gpu-recorder-rs
+```
+
+## Usage
+
+Running the binary with no arguments opens the Dynamic Island.
+
+```bash
+# Start in the light theme with the Studio drawer open
+HYPERGSR_THEME=light HYPERGSR_EXPANDED=1 ./target/release/gpu-recorder-rs
+
+# Record 5 seconds from the command line, with auto-zoom
+./target/release/gpu-recorder-rs --record-seconds 5
+
+# Render a self-contained 60 FPS auto-zoom showcase MP4
+./target/release/gpu-recorder-rs --export-demo ./hypergsr_demo.mp4
+
+# Print detected GPU encoders, DRM cursor planes and pipeline info as JSON
+./target/release/gpu-recorder-rs --report
+
+# Serve the Web Studio on http://127.0.0.1:7878
+./target/release/gpu-recorder-rs --web
+
+# Run the unit tests
+cargo test
+```
+
+Recordings are saved to `~/Videos`.
+
+## Zoom triggers
+
+Auto-zoom handles most recordings. When you want control during a live tutorial or demo:
+
+| Feature | How it works |
 | :--- | :--- |
-| **🎯 Self-Registering Combo (`Record Combo…`)** | Click **`🎯 Record Combo…`** in the Studio drawer (or press any key/mouse button/shake gesture within 5 seconds) to bind your own custom zoom trigger on the fly. |
-| **Built-In Gesture Presets** | `Shake / MidClick` • `Double-Click` • `Right-Click` • `Ctrl + Alt` • `Ctrl + Shift` • `Super + Z` • `Mouse4 / Mouse5` |
-| **3 Combo Action Modes** | **1. `Toggle Lock`** (press once to lock zoom in, press again to return to `1.0×`)<br/>**2. `Hold Combo`** (stays zoomed while held, releases smoothly on let-go)<br/>**3. `Cycle 1×/2×/2.8×`** (steps through magnification depths on each trigger) |
-| **🖱️ Live Scroll Wheel Zoom (`1.0×` – `3.2×`)** | Scroll the mouse wheel over the **16:9 Viewfinder Radar** (or use the `🔒 Lock / Unlock Zoom` button) to dial in exact magnification depth in real time. |
+| **Record Combo…** | Click **Record Combo…** in the Studio drawer, then press any key, mouse button or shake gesture within 5 seconds to bind it as your zoom trigger. |
+| **Built-in presets** | Shake / middle-click, double-click, right-click, `Ctrl+Alt`, `Ctrl+Shift`, `Super+Z`, `Mouse4` / `Mouse5` |
+| **Action modes** | **Toggle lock**: press once to zoom in, again to return to 1.0×.<br/>**Hold**: stays zoomed while held and releases smoothly.<br/>**Cycle**: steps through 1×, 2× and 2.8×. |
+| **Scroll-wheel zoom** | Scroll over the camera preview, or use **Lock / Unlock Zoom**, to set depth from 1.0× to 3.2×. |
 
----
+## How it works
 
-## 📊 Feature Comparison Matrix
-
-| Capability | `gpu-screen-recorder` (v6.1.4) | OBS Studio | Screen Studio (macOS) | **HyperGSR (`gpu-recorder-rs`)** |
-| :--- | :---: | :---: | :---: | :---: |
-| **Native Linux Wayland & X11 Support** | ✅ (Broken on `--user` Flatpak) | ✅ Yes | ❌ macOS only | ✅ **Standalone Native + Flatpak Fix** |
-| **Rootless Wayland Global Cursor Tracking** | ❌ X11 `XFixes` only | ❌ Compositor-dependent | ❌ macOS only | ✅ **DRM Hardware Cursor Plane `#92`** |
-| **Automatic Spring-Physics Zoom-Ins** | ❌ None | ❌ Manual plugins | ✅ Yes | ✅ **240 Hz Critically-Damped Solver** |
-| **Self-Registering Custom Zoom Combos** | ❌ None | ❌ Basic hotkeys | ⚠️ Limited | ✅ **Keys + Mouse Buttons + Shake + Wheel** |
-| **Wayland Layer-Shell Dynamic Island HUD** | ❌ Legacy window | ❌ Full window | ❌ macOS menu bar | ✅ **`zwlr_layer_shell_v1` RGBA Island** |
-| **Obsidian Dark & Pearl Light Themes** | ❌ None | ✅ Themes | ❌ Dark only | ✅ **1-Click Live CSS Theme Switching** |
-| **Idle Memory & CPU Overhead** | ~45 MB | ~340 MB | ~650 MB (Electron) | **~56 MB RSS / `<1.5%` CPU (Native Rust)** |
-
----
-
-## 🔬 How Rootless Wayland Auto-Zoom Works
-
-We began by disassembling `com.dec05eba.gpu_screen_recorder` (`v6.1.4`) to understand why cursor tracking and user-installed Flatpak bridges fail on modern Wayland compositors. Full ELF disassembly notes are documented in [`RE_ANALYSIS.md`](RE_ANALYSIS.md).
+HyperGSR started as a reverse-engineering pass over `gpu-screen-recorder` 6.1.4, to find out why cursor tracking and user-installed Flatpak bridges fail on Wayland. What it kept, what it replaced and why is written up in [`RE_ANALYSIS.md`](RE_ANALYSIS.md).
 
 ```mermaid
 flowchart LR
-    subgraph Wayland["Linux Wayland + Kernel DRM"]
-        PW["PipeWire ScreenCast\nXDG Portal (1920x1080@60)"]
-        DRM["/dev/dri/card1\nDRM Cursor Plane #92\n(CRTC_X, CRTC_Y, FB_ID)"]
-        LS["zwlr_layer_shell_v1\nTop-Notch Layer Surface"]
+    subgraph Wayland["Linux Wayland + kernel DRM"]
+        PW["PipeWire ScreenCast\nXDG portal"]
+        DRM["/dev/dri/card*\nDRM cursor plane\n(CRTC_X, CRTC_Y, FB_ID)"]
+        LS["zwlr_layer_shell_v1\nlayer surface"]
     end
 
-    subgraph HyperGSR["HyperGSR (gpu-recorder-rs)"]
-        CAP["hypergsr-pw-capture\n+ Token Reuse"]
-        CUR["DrmCursorReader\n+ Gesture Detector"]
-        ZOOM["240Hz Spring Camera\n+ Trajectory Planner"]
-        GUI["GTK4 Dynamic Island\nDark & Light Studio"]
-        ENC["NVENC / VAAPI\nAuto-Zoom Renderer"]
+    subgraph HyperGSR["HyperGSR"]
+        CAP["hypergsr-pw-capture\n+ restore token"]
+        CUR["DrmCursorReader\n+ gesture detector"]
+        ZOOM["240 Hz spring camera\n+ trajectory planner"]
+        GUI["GTK 4 Dynamic Island"]
+        ENC["NVENC / VAAPI\nauto-zoom renderer"]
     end
 
     PW --> CAP --> ENC
@@ -125,120 +235,65 @@ flowchart LR
     GUI <--> LS
 ```
 
-1. **Direct DRM Hardware Cursor Plane Polling (`src/cursor.rs`)**:
-   Instead of calling `XQueryPointer` (which deadlocks or stalls on rootless `Xwayland` when native Wayland windows have focus), `DrmCursorReader` opens `/dev/dri/card*`, enables `DRM_CLIENT_CAP_UNIVERSAL_PLANES` + `DRM_CLIENT_CAP_ATOMIC`, and reads `CRTC_X`, `CRTC_Y`, and `FB_ID` from the hardware cursor plane at 60 Hz without `sudo`.
-2. **Critically-Damped 2D Spring-Damper Virtual Camera (`src/zoom_engine.rs`)**:
-   The camera position $\mathbf{x}(t) = (c_x, c_y, z)$ is integrated at 240 Hz sub-steps using an exact critically-damped ODE ($\zeta = 1.0$, zero overshoot oscillation):
+1. **Cursor from the GPU, not the compositor** ([`src/cursor.rs`](src/cursor.rs)). `DrmCursorReader` enables `DRM_CLIENT_CAP_UNIVERSAL_PLANES` and `DRM_CLIENT_CAP_ATOMIC`, finds the cursor plane and reads its position and framebuffer at 60 Hz. The plane already holds the exact position the display controller is drawing, so no compositor protocol is needed.
+2. **A spring with exactly enough damping** ([`src/zoom_engine.rs`](src/zoom_engine.rs)). Pan and zoom are springs with damping set to 2√k, the critical point, integrated at 240 Hz substeps. The camera reaches its target as fast as it can without overshooting:
 
-$$\ddot{\mathbf{x}} = -k(\mathbf{x} - \mathbf{x}_{\text{target}}) - 2\sqrt{k}\,\dot{\mathbf{x}}$$
+   $$\ddot{\mathbf{x}} = -k(\mathbf{x} - \mathbf{x}_{\text{target}}) - 2\sqrt{k}\,\dot{\mathbf{x}}$$
 
-3. **Two-Pass Trajectory Planner (`build_camera_trajectory` in `src/zoom_engine.rs`)**:
-   During MP4 post-processing (`src/encoder.rs`), recorded cursor telemetry is analyzed to construct clean, bounded Screen Studio zoom segments (`hold_duration_ms`, fast-travel pull-back to `1.0×`, and smooth $C^2$ transitions) encoded with hardware `h264_nvenc` / `h264_vaapi`.
+3. **Two-pass trajectory planning** (`build_smooth_60fps_camera_frames` in [`src/encoder.rs`](src/encoder.rs)). After recording, the cursor telemetry is turned into bounded zoom segments (about 1.75 s per focus cluster), with pull-back to 1.0× during fast travel and smooth transitions, then the final MP4 is encoded with `h264_nvenc` or `h264_vaapi`.
 
----
+## Compared with other recorders
 
-## 🚀 15-Second Quick Start
+OBS and `gpu-screen-recorder` are excellent general-purpose recorders. HyperGSR does one thing they don't do out of the box: a camera that follows the cursor on Wayland.
 
-### 1. One-Command Install (Ubuntu / Pop!_OS / COSMIC / Debian / Fedora / Arch)
+| | `gpu-screen-recorder` 6.1.4 | OBS Studio | Screen Studio | **HyperGSR** |
+| :--- | :---: | :---: | :---: | :---: |
+| Runs on Linux Wayland | Yes (Flatpak `--user` bridge broken) | Yes | No, macOS only | **Yes** |
+| Cursor tracking on native Wayland | X11 `XFixes` only | Depends on compositor | n/a | **DRM cursor plane** |
+| Automatic zoom | No | Plugins, manual | Yes | **Yes, spring camera** |
+| Custom zoom triggers | No | Basic hotkeys | Limited | **Keys, mouse buttons, shake, wheel** |
+| Idle memory | ~45 MB | ~340 MB | ~650 MB (Electron) | **~56 MB** |
 
-```bash
-git clone https://github.com/KunalSiyag/gpu-recorder-rs.git
-cd gpu-recorder-rs
-./install.sh
-```
+## Project layout
 
-Or install dependencies manually and build with Cargo:
+| Path | What's in it |
+| :--- | :--- |
+| [`src/main.rs`](src/main.rs) | CLI modes and startup (preloads gtk4-layer-shell on Wayland) |
+| [`src/gui.rs`](src/gui.rs) | GTK 4 Dynamic Island, Studio drawer and themes (`load_dynamic_island_css()`) |
+| [`src/cursor.rs`](src/cursor.rs) | DRM and X11 cursor readers, shake detection, click ripples |
+| [`src/zoom_engine.rs`](src/zoom_engine.rs) | Spring camera, auto-zoom modes and zoom-combo bindings |
+| [`src/encoder.rs`](src/encoder.rs) | Trajectory planner, auto-zoom rendering and NVENC/VAAPI encoding through FFmpeg |
+| [`src/shaders.rs`](src/shaders.rs) | GLSL for cursor ripples and effects |
+| [`src/pw_portal_capture.c`](src/pw_portal_capture.c) | Standalone PipeWire + XDG portal capture helper |
+| [`src/web_ui.rs`](src/web_ui.rs) | Web Studio server (`--web`) |
+| [`docs/`](docs/) | Website, served by GitHub Pages |
 
-<details>
-<summary><b>📦 Manual Dependencies by Distro (Ubuntu/Debian, Fedora, Arch)</b></summary>
+## Roadmap
 
-**Ubuntu / Pop!_OS / COSMIC / Debian:**
-```bash
-sudo apt update && sudo apt install -y \
-  build-essential pkg-config cargo rustc clang \
-  libgtk-4-dev libgtk4-layer-shell-dev libdrm-dev libx11-dev \
-  libpipewire-0.3-dev libportal-dev ffmpeg
-```
+- [x] Rootless DRM cursor plane reader
+- [x] Layer-shell Dynamic Island with dark and light themes
+- [x] 240 Hz spring camera and trajectory planner
+- [x] Custom zoom combos and scroll-wheel zoom
+- [x] Standalone PipeWire + portal + NVENC/VAAPI capture
+- [ ] On-screen keystroke overlay (`Ctrl+C`, `Super+Enter`)
+- [ ] Circular webcam picture-in-picture that follows the camera
+- [ ] Wallpaper padding and shadow frame around the recording
+- [ ] WebM / AV1 (`av1_nvenc`, `av1_vaapi`) and GIF export
 
-**Fedora:**
-```bash
-sudo dnf install -y \
-  cargo rust gtk4-devel gtk4-layer-shell-devel libdrm-devel \
-  libX11-devel pipewire-devel libportal-devel ffmpeg
-```
+## Contributing
 
-**Arch Linux:**
-```bash
-sudo pacman -S --needed \
-  rust gtk4 gtk4-layer-shell libdrm libx11 pipewire libportal ffmpeg
-```
-</details>
+Pull requests are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers setup, and these are good places to start:
 
-### 2. Run the Dynamic Island Studio
-
-```bash
-cargo build --release
-./target/release/gpu-recorder-rs
-```
-
-### 3. CLI & Automation Modes
-
-```bash
-# Launch in Pearl Light Mode with the Studio drawer expanded:
-HYPERGSR_THEME=light HYPERGSR_EXPANDED=1 ./target/release/gpu-recorder-rs
-
-# Record a standalone 5-second Zero-Copy GPU + Auto-Zoom MP4 from the CLI:
-./target/release/gpu-recorder-rs --record-seconds 5
-
-# Export a self-contained 60 FPS GPU Auto-Zoom & Cursor FX showcase MP4:
-./target/release/gpu-recorder-rs --export-demo ./hypergsr_demo.mp4
-
-# Inspect GPU encoders, DRM cursor planes, and binary topology as JSON:
-./target/release/gpu-recorder-rs --report
-
-# Run the unit test suite:
-cargo test
-```
-
----
-
-## 🍴 Fork & Hack in 5 Minutes
-
-HyperGSR is intentionally architected as a clean, modular Rust workspace so you can **fork it** and build your own Linux screen-recording superpowers. Check out [`CONTRIBUTING.md`](CONTRIBUTING.md) for full details!
-
-| What You Want to Hack | File to Edit | Difficulty |
+| Idea | Where | Difficulty |
 | :--- | :--- | :---: |
-| 🎨 **Add a new Dynamic Island Theme** (Catppuccin, Nord, Gruvbox, TokyoNight) | [`src/gui.rs`](src/gui.rs) (`build_css()`) | 🟢 Easy |
-| 🎥 **Add a new Camera Spring Preset** (Bouncy, Cinematic Slow-Mo, Instant Snap) | [`src/zoom_engine.rs`](src/zoom_engine.rs) | 🟢 Easy |
-| 🎮 **Add a new Global Gesture Trigger** (3-Finger Swipe, Circle Cursor, HotCorner) | [`src/cursor.rs`](src/cursor.rs) (`ZoomComboBinding`) | 🟡 Medium |
-| ✨ **Add Custom GLSL Shaders** (Keystroke HUD, Spotlight Vignette, Chroma Key) | [`src/shaders.rs`](src/shaders.rs) & [`src/encoder.rs`](src/encoder.rs) | 🟡 Medium |
-| 🔌 **Add Multi-Monitor / Audio Waveform Overlay** | [`src/pw_portal_capture.c`](src/pw_portal_capture.c) | 🔴 Advanced |
+| A new Island theme (Catppuccin, Nord, Gruvbox, Tokyo Night) | [`src/gui.rs`](src/gui.rs) `load_dynamic_island_css()` | Easy |
+| A new camera preset (bouncy, slow cinematic, instant snap) | [`src/zoom_engine.rs`](src/zoom_engine.rs) | Easy |
+| A new gesture trigger (circle cursor, hot corner) | [`src/zoom_engine.rs`](src/zoom_engine.rs) `ZoomComboBinding`, [`src/cursor.rs`](src/cursor.rs) | Medium |
+| New shader effects (spotlight vignette, keystroke HUD) | [`src/shaders.rs`](src/shaders.rs), [`src/encoder.rs`](src/encoder.rs) | Medium |
+| Multi-monitor capture or an audio waveform overlay | [`src/pw_portal_capture.c`](src/pw_portal_capture.c) | Advanced |
 
-👉 **[Click here to Fork `gpu-recorder-rs`](https://github.com/KunalSiyag/gpu-recorder-rs/fork)** and open a Pull Request — we merge clean community PRs fast!
+If HyperGSR is useful to you, a star helps other Linux and Rust developers find it.
 
----
+## License
 
-## 🗺️ Roadmap & Open Community Features
-
-- [x] Native Wayland DRM Hardware Cursor Plane `#92` reader (`zero-root`)
-- [x] Native Wayland Layer-Shell (`zwlr_layer_shell_v1`) Dynamic Island UI with Dark & Light modes
-- [x] 240 Hz Critically-Damped Spring Camera & Bounded Trajectory Planner
-- [x] Self-Registering Custom Zoom Combinations (`🎯 Record Combo…`) & Wheel Zoom
-- [x] Standalone Native PipeWire + XDG Desktop Portal + NVENC/VAAPI Capture Engine
-- [ ] Live On-Screen Keystroke Visualizer Pill (`Ctrl + C`, `Super + Enter`)
-- [ ] Circular Webcam Picture-in-Picture (PiP) Overlay with Spring Follow
-- [ ] Custom Desktop Background Padding & Shadow Frame (macOS Screen Studio Wallpaper Frame)
-- [ ] Export directly to WebM / AV1 (`av1_nvenc` / `av1_vaapi`) & GIF
-
----
-
-## 🌟 Support the Project
-
-If **HyperGSR** saves you time or inspires your Linux desktop setup:
-1. **⭐ Star this repository** at the top right of the page — it helps more Linux & Rust developers discover the project!
-2. **🍴 Fork the repo** to customize your own themes, shaders, or zoom bindings.
-3. **📣 Share it** on `r/rust`, `r/linux`, `r/unixporn`, Hacker News, or X!
-
-## 📜 License
-
-Released under the [MIT License](LICENSE). Built with ❤️ in Rust.
+[MIT](LICENSE)
