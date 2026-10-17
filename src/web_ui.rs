@@ -490,7 +490,7 @@ async function refreshLoop() {
     }
     const kfTrack = document.getElementById('kfTrack');
     kfTrack.innerHTML = d.keyframes.map(k =>
-      `<span class="kf-pill" onclick="triggerZoom(${k.target_x}, ${k.target_y}, ${k.zoom})">${(k.timestamp_ms/1000).toFixed(1)}s: ${k.label} (${k.zoom}x)</span>`
+      `<span class="kf-pill" onclick="triggerZoom(${k.target_x}, ${k.target_y}, ${k.zoom_scale})">${(k.start_ms/1000).toFixed(1)}s: ${k.label} (${k.zoom_scale}x)</span>`
     ).join('');
   } catch (e) {}
 }

@@ -139,7 +139,7 @@ sudo apt update && sudo apt install -y \
   libpipewire-0.3-dev libportal-dev ffmpeg
 ```
 
-**Ubuntu 24.04 / 25.04 / Pop!_OS 24.04:** `libgtk4-layer-shell-dev` isn't packaged before Ubuntu 25.10. Install everything above except that package, then build it from source, the same way CI does:
+**Ubuntu 24.04 / 25.04 / Pop!_OS 24.04:** `libgtk4-layer-shell-dev` isn't packaged before Ubuntu 25.10. `./install.sh` builds it from source automatically. To do it by hand, install everything above except that package, then:
 
 ```bash
 sudo apt install -y meson ninja-build libwayland-dev libwayland-bin wayland-protocols

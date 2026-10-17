@@ -66,9 +66,9 @@ Early prototypes of auto-zoom recorders suffer from two annoying bugs:
 1. **Motion Sickness / Wobble**: Every tiny mouse wiggle pans the camera.
 2. **Stuck Zoom**: The camera zooms in to `2.0×` and stays zoomed in forever.
 
-In [`src/zoom_engine.rs`](https://github.com/KunalSiyag/gpu-recorder-rs/blob/main/src/zoom_engine.rs), we implemented a two-layer camera system:
+Across [`src/zoom_engine.rs`](https://github.com/KunalSiyag/gpu-recorder-rs/blob/main/src/zoom_engine.rs) and [`src/encoder.rs`](https://github.com/KunalSiyag/gpu-recorder-rs/blob/main/src/encoder.rs), we implemented a two-layer camera system:
 
-### 1. Bounded Screen Studio Trajectory Planner (`build_camera_trajectory`)
+### 1. Bounded Screen Studio Trajectory Planner (`build_smooth_60fps_camera_frames`)
 Instead of staying zoomed in continuously, the planner detects discrete focus moments (clicks, custom gesture combos, or stationary dwell clusters where velocity drops below `0.14 uv/s` after traveling across the screen), holds the zoom for `1.65s`, and **automatically pulls back to `1.0×` wide view** whenever the cursor makes a fast cross-screen move (`speed > 1.15 uv/s`).
 
 ### 2. 240Hz Sub-Stepped Critically-Damped Spring ODE ($\zeta = 1.0$)

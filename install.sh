@@ -10,8 +10,23 @@ if command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update -qq
     sudo apt-get install -y \
         build-essential pkg-config clang ffmpeg \
-        libgtk-4-dev libgtk4-layer-shell-dev libdrm-dev libx11-dev \
+        libgtk-4-dev libdrm-dev libx11-dev \
         libpipewire-0.3-dev libportal-dev
+    if apt-cache show libgtk4-layer-shell-dev >/dev/null 2>&1; then
+        sudo apt-get install -y libgtk4-layer-shell-dev
+    elif ! pkg-config --exists gtk4-layer-shell-0; then
+        # Not packaged before Ubuntu 25.10; build it into /usr/local like CI does.
+        echo "📦 libgtk4-layer-shell-dev not in apt — building gtk4-layer-shell v1.3.0 from source..."
+        sudo apt-get install -y git meson ninja-build libwayland-dev libwayland-bin wayland-protocols
+        gls_dir="$(mktemp -d)"
+        git clone --depth 1 --branch v1.3.0 https://github.com/wmww/gtk4-layer-shell.git "$gls_dir"
+        meson setup "$gls_dir/build" "$gls_dir" \
+            -Dexamples=false -Ddocs=false -Dtests=false -Dintrospection=false -Dvapi=false
+        ninja -C "$gls_dir/build"
+        sudo ninja -C "$gls_dir/build" install
+        sudo ldconfig
+        rm -rf "$gls_dir"
+    fi
 elif command -v dnf >/dev/null 2>&1; then
     echo "📦 Detected Fedora — checking system dependencies..."
     sudo dnf install -y \
