@@ -1,0 +1,85 @@
+name: Bug report
+description: Something doesn't work, crashes, or records the wrong thing
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The details below help reproduce problems on other compositors and GPUs.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `hypergsr`
+        2. Click Record
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install HyperGSR?
+      options:
+        - npm / npx
+        - cargo install
+        - AUR
+        - Release tarball
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: HyperGSR version
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      placeholder: "Arch Linux, Ubuntu 24.04, Fedora 41, ..."
+    validations:
+      required: true
+  - type: input
+    id: compositor
+    attributes:
+      label: Desktop / compositor
+      placeholder: "COSMIC, GNOME 47, KDE Plasma 6.2, Hyprland 0.45, Sway, X11, ..."
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: "NVIDIA RTX 3050 (565.57), AMD RX 6700 (Mesa 24.2), Intel Arc, hybrid laptop, ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: hwcursor
+    attributes:
+      label: Does your compositor use a hardware cursor?
+      description: Cursor tracking reads the GPU cursor plane. Some setups (for example Hyprland's `cursor:no_hardware_cursors`, common on NVIDIA) draw the cursor in software.
+      options:
+        - I don't know
+        - "Yes"
+        - "No, software cursor"
+  - type: textarea
+    id: report
+    attributes:
+      label: Output of `hypergsr --report`
+      description: Use `gpu-recorder-rs --report` if you installed with cargo or from source.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal output or logs
+      render: text

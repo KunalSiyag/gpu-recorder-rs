@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/KunalSiyag/gpu-recorder-rs/discussions
+    about: Ask setup questions, share recordings, or float an idea before filing an issue.
