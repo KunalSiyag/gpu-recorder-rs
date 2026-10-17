@@ -1,6 +1,6 @@
 ---
 title: "Cursor-following auto-zoom on Linux Wayland: reading the cursor from the GPU in Rust"
-published: false
+published: true
 description: "Wayland won't tell apps where the cursor is. Here's how HyperGSR reads it from the DRM hardware cursor plane without root, and drives a critically damped spring camera for Screen Studio-style auto-zoom."
 tags: rust, linux, opensource, showdev
 cover_image: https://kunalsiyag.github.io/gpu-recorder-rs/screenshots/devto-cover.png
@@ -199,6 +199,6 @@ Each open issue names the file to start in:
 - [#2 Show pressed keys as an on-screen pill in the recorded MP4](https://github.com/KunalSiyag/gpu-recorder-rs/issues/2) (`src/encoder.rs`)
 - [#3 Add wallpaper padding and a drop-shadow frame to exports](https://github.com/KunalSiyag/gpu-recorder-rs/issues/3) (good first issue, `src/encoder.rs`)
 
-If you've solved the Wayland cursor problem a different way, I'd like to hear it in the comments. [mathisdev7](https://dev.to/mathisdev7) has written about building a Screen Studio alternative for Linux with Rust and wgpu, and about the state of Linux screen recording in 2026; worth reading next to this one.
+If you've solved the Wayland cursor problem a different way, I'd like to hear it in the comments. [mathisdev7](https://dev.to/mathisdev7) took a different route in [I'm 19 and I Built a Screen Studio Alternative for Linux with Rust and wgpu](https://dev.to/mathisdev7/im-19-and-i-built-a-screen-studio-alternative-for-linux-with-rust-and-wgpu-heres-what-i-learned-log); it's worth reading next to this one.
 
 **Links:** [Landing page and live spring camera](https://kunalsiyag.github.io/gpu-recorder-rs/) · [Source on GitHub](https://github.com/KunalSiyag/gpu-recorder-rs) · [Reverse-engineering notes](https://github.com/KunalSiyag/gpu-recorder-rs/blob/main/RE_ANALYSIS.md)
