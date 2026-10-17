@@ -14,6 +14,7 @@
 **[Download v1.0.0](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)** ·
 **[Promo video (10 s, 1080p60)](https://kunalsiyag.github.io/gpu-recorder-rs/hypergsr-promo-1080p60.mp4)** ·
 **[How it works](#how-it-works)** ·
+**[Write-up on DEV](https://dev.to/kunalsiyag/cursor-following-auto-zoom-on-linux-wayland-reading-the-cursor-from-the-gpu-in-rust-4nij)** ·
 **[Contributing](CONTRIBUTING.md)**
 
 </div>
@@ -210,7 +211,7 @@ Auto-zoom handles most recordings. When you want control during a live tutorial 
 
 ## How it works
 
-HyperGSR started as a reverse-engineering pass over `gpu-screen-recorder` 6.1.4, to find out why cursor tracking and user-installed Flatpak bridges fail on Wayland. What it kept, what it replaced and why is written up in [`RE_ANALYSIS.md`](RE_ANALYSIS.md).
+HyperGSR started as a reverse-engineering pass over `gpu-screen-recorder` 6.1.4, to find out why cursor tracking and user-installed Flatpak bridges fail on Wayland. What it kept, what it replaced and why is written up in [`RE_ANALYSIS.md`](RE_ANALYSIS.md). For the longer story behind the cursor plane trick and the spring camera, read [Cursor-following auto-zoom on Linux Wayland: reading the cursor from the GPU in Rust](https://dev.to/kunalsiyag/cursor-following-auto-zoom-on-linux-wayland-reading-the-cursor-from-the-gpu-in-rust-4nij) on DEV.
 
 ```mermaid
 flowchart LR
