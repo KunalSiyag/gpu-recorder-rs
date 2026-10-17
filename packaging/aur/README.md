@@ -1,6 +1,8 @@
 # AUR packages
 
-These are the sources for the [AUR](https://aur.archlinux.org/) packages:
+These are the sources for the [AUR](https://aur.archlinux.org/) packages. They are not on the AUR
+yet because new account registration is closed; until then, build them locally with `makepkg -si`
+from either directory.
 
 - `hypergsr-bin/` installs the prebuilt binary from the GitHub release tarball.
 - `hypergsr-git/` builds the latest `main` from source.

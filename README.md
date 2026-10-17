@@ -7,6 +7,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/KunalSiyag/gpu-recorder-rs/ci.yml?branch=main&style=flat-square&label=CI&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/KunalSiyag/gpu-recorder-rs?style=flat-square&color=3fb950&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/releases/latest)
 [![npm](https://img.shields.io/npm/v/hypergsr?style=flat-square&color=cb3837&labelColor=262626)](https://www.npmjs.com/package/hypergsr)
+[![crates.io](https://img.shields.io/crates/v/gpu-recorder-rs?style=flat-square&color=e6a23c&labelColor=262626)](https://crates.io/crates/gpu-recorder-rs)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1a1?style=flat-square&labelColor=262626)](LICENSE)
 [![Rust 2021](https://img.shields.io/badge/rust-2021-a1a1a1?style=flat-square&logo=rust&labelColor=262626)](https://www.rust-lang.org/)
 [![Stars](https://img.shields.io/github/stars/KunalSiyag/gpu-recorder-rs?style=flat-square&color=a1a1a1&labelColor=262626)](https://github.com/KunalSiyag/gpu-recorder-rs/stargazers)
@@ -150,6 +151,18 @@ Only the launcher and native runtime files are shipped, alongside the package me
 README, and license. `npm run build:native` builds the bundle without packing it.
 Keep the npm and Cargo versions in sync. Maintainers should use the Ubuntu 24.04 CI
 artifact for distribution rather than binaries built on a newer distro.
+
+### Arch Linux
+
+The repository includes tested PKGBUILDs. Build and install the prebuilt release with:
+
+```bash
+git clone https://github.com/KunalSiyag/gpu-recorder-rs.git
+cd gpu-recorder-rs/packaging/aur/hypergsr-bin
+makepkg -si
+```
+
+Use `packaging/aur/hypergsr-git` instead to build the latest `main` from source.
 
 ### Prebuilt binary (x86_64)
 
