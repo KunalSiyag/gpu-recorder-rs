@@ -847,7 +847,7 @@
         <div class="frame metrics">
           <span class="c tl"></span><span class="c tr"></span><span class="c bl"></span><span class="c br"></span>
           <div class="metric"><span class="eyebrow">Resident memory</span><div class="v">56<small>MB</small></div><p>Native Rust and GTK4. No browser engine, no plugin host.</p></div>
-          <div class="metric"><span class="eyebrow">CPU at 1080p60</span><div class="v">&lt;1.5<small>%</small></div><p>Capture and encode stay on the GPU. The CPU only steps the camera.</p></div>
+          <div class="metric"><span class="eyebrow">CPU at 1080p60</span><div class="v">&lt;1.5<small>%</small></div><p>Encoding runs on NVENC. The CPU copies each frame once and steps the camera.</p></div>
           <div class="metric"><span class="eyebrow">Cursor source</span><div class="v">#92</div><p>DRM hardware cursor plane, read at 60&nbsp;Hz through <code class="mono">libdrm</code>.</p></div>
           <div class="metric"><span class="eyebrow">Camera solver</span><div class="v">240<small>Hz</small></div><p>Critically damped, so it settles without overshoot or wobble.</p></div>
         </div>
