@@ -201,13 +201,26 @@ async fn post_settings(
 }
 
 async fn post_toggle_record(State(state): State<SharedStudioState>) -> impl IntoResponse {
-    let mut g = state.lock();
-    if g.encoder_session.is_some() {
-        let _ = g.stop_recording();
-    } else {
-        let _ = g.start_recording();
+    let job = {
+        let mut g = state.lock();
+        let job = g.take_recording();
+        if job.is_none() {
+            let _ = g.start_recording();
+        }
+        job
+    };
+    // Finalize and render off the async runtime and outside the state lock,
+    // so the studio keeps serving while the file is written.
+    if let Some(job) = job {
+        let st = state.clone();
+        tokio::task::spawn_blocking(move || {
+            match job.complete(&std::sync::atomic::AtomicU32::new(0)) {
+                Ok(path) => st.lock().last_saved_file = Some(path.display().to_string()),
+                Err(err) => eprintln!("[HyperGSR] Could not save the recording: {err:#}"),
+            }
+        });
     }
-    Json(g.snapshot())
+    Json(state.lock().snapshot())
 }
 
 async fn post_export_showcase(State(state): State<SharedStudioState>) -> impl IntoResponse {

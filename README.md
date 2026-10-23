@@ -48,8 +48,12 @@ It runs on native Wayland (COSMIC, GNOME, KDE Plasma, Hyprland, Sway) and on X11
 - **Tracks the cursor on Wayland without root.** Recorders that call `XQueryPointer` go blind or stall once a native Wayland window has focus. HyperGSR opens `/dev/dri/card*` through `libdrm` and reads `CRTC_X`, `CRTC_Y` and `FB_ID` from the hardware cursor plane at 60 Hz.
 - **Zooms like a camera operator.** A critically damped spring (ζ = 1.0) integrated at 240 Hz substeps moves the crop. Pause on something and the camera settles in; move fast and it pulls back to 1.0×, so it never gets stuck zoomed in.
 - **Lets you take over.** Bind your own zoom trigger (keys, mouse buttons, shake, double-click), lock the zoom, or dial depth from 1.0× to 3.2× with the scroll wheel.
-- **Stays out of the way.** The controls live in a small Dynamic Island docked to the top of the screen through `zwlr_layer_shell_v1`, with a dark and a light theme.
-- **Asks for screen permission once.** The bundled PipeWire/portal helper (`bin/hypergsr-pw-capture`) stores the portal `restore_token`, so later recordings skip the picker.
+- **Records a screen, a window, or an area.** Pick the source in the Studio drawer; drag out an area on a full-screen overlay to record just that rectangle.
+- **Records sound.** Desktop audio, the microphone, or both mixed, captured on the same clock as the video.
+- **Frames it for presenting.** Place the recording on a gradient or your own image, with padding, rounded corners and a soft shadow. Auto-zoom and the background are applied in one GPU-assisted pass after you stop.
+- **Never loses a take.** Video time comes from the wall clock, so a recording lasts exactly as long as you recorded, even on a still screen. Captures are written as fragmented MP4, so a crash keeps everything up to the last second, and if the capture stops on its own the island says why and saves what it has.
+- **Stays out of the way.** The controls live in a small Dynamic Island that stays above every window: through `zwlr_layer_shell_v1` on COSMIC, KDE, Hyprland and Sway, and as an always-on-top X11 window on GNOME.
+- **Asks for screen permission once.** The bundled PipeWire/portal helper (`bin/hypergsr-pw-capture`) stores the portal `restore_token`, so later recordings skip the picker. **Choose…** in the drawer shows the picker again.
 
 ## Screenshots
 
@@ -280,8 +284,15 @@ Running the binary with no arguments opens the Dynamic Island.
 # Start in the light theme with the Studio drawer open
 HYPERGSR_THEME=light HYPERGSR_EXPANDED=1 ./target/release/gpu-recorder-rs
 
-# Record 5 seconds from the command line, with auto-zoom
+# Start or stop recording in the running island (bind this to a key)
+./target/release/gpu-recorder-rs --toggle-recording
+
+# Record 5 seconds from the command line, with the island's saved settings
 ./target/release/gpu-recorder-rs --record-seconds 5
+
+# Re-render a capture with saved cursor telemetry and the current background
+./target/release/gpu-recorder-rs --render-capture capture.mp4 \
+  ~/.cache/hypergsr/telemetry/HyperGSR_<time>.json out.mp4
 
 # Render a self-contained 60 FPS auto-zoom showcase MP4
 ./target/release/gpu-recorder-rs --export-demo ./hypergsr_demo.mp4
@@ -296,7 +307,33 @@ HYPERGSR_THEME=light HYPERGSR_EXPANDED=1 ./target/release/gpu-recorder-rs
 cargo test
 ```
 
-Recordings are saved to `~/Videos`.
+**Start/stop shortcut.** Wayland does not let apps grab keys globally, so the
+shortcut is a desktop keybinding that runs `--toggle-recording`. Click **Set up**
+in the Record tab to add **Ctrl+Alt+R** on COSMIC or GNOME (COSMIC's shortcut file
+is backed up first); on other desktops, bind the command shown in its tooltip.
+If HyperGSR is not running, the shortcut starts it and begins recording.
+
+While recording, the island shrinks to a small pill (timer, zoom, Stop) that stays
+above other windows; drag it by its left end to move it out of the way.
+
+Recordings are saved to `~/Videos`; **Change…** next to "Save to" in the Record tab
+picks another folder (the Flatpak can only write where its file chooser grants
+access). The folder, source, audio, frame rate, quality and background you pick in
+the Studio drawer are remembered in
+`~/.config/hypergsr/settings.json`.
+
+| Variable | Effect |
+| :--- | :--- |
+| `HYPERGSR_ENCODER=x264` | Skip hardware encoders and use libx264 |
+| `HYPERGSR_OPEN_STUDIO=1`, `HYPERGSR_STUDIO_TAB=record` or `camera` | Start with the Studio drawer open on that tab |
+| `HYPERGSR_GDK_BACKEND=x11` or `wayland` | Override the island's display backend (X11 is the default on GNOME) |
+
+With several displays, auto-zoom follows the cursor only while it is on the
+recorded one and holds the wide view while it is elsewhere. Displays are told
+apart by resolution, so two identical screens are treated as one.
+
+If a recording fails, the reason is shown in the island, and the capture
+helper's and FFmpeg's messages are in `~/.cache/hypergsr/capture.log`.
 
 ## Zoom triggers
 
@@ -341,7 +378,9 @@ flowchart LR
 
    $$\ddot{\mathbf{x}} = -k(\mathbf{x} - \mathbf{x}_{\text{target}}) - 2\sqrt{k}\,\dot{\mathbf{x}}$$
 
-3. **Two-pass trajectory planning** (`build_smooth_60fps_camera_frames` in [`src/encoder.rs`](src/encoder.rs)). After recording, the cursor telemetry is turned into bounded zoom segments (about 1.75 s per focus cluster), with pull-back to 1.0× during fast travel and smooth transitions, then the final MP4 is encoded with `h264_nvenc` or `h264_vaapi`.
+3. **Two-pass trajectory planning** (`build_smooth_60fps_camera_frames` in [`src/encoder.rs`](src/encoder.rs)). After recording, the cursor telemetry is turned into bounded zoom segments (about 1.75 s per focus cluster), with pull-back to 1.0× during fast travel and smooth transitions.
+4. **Wall-clock capture** ([`src/pw_portal_capture.c`](src/pw_portal_capture.c)). The helper sends a frame to FFmpeg only when the compositor delivers a new one (plus a keepalive), and FFmpeg stamps each with the wall clock and fills gaps at a constant frame rate. Video time zero is the first captured frame, which is also when cursor telemetry starts, so zooms land exactly where you clicked.
+5. **One-pass studio render** ([`src/studio_render.rs`](src/studio_render.rs)). FFmpeg decodes the capture on the GPU into NV12, a multithreaded compositor applies the zoom and places the frame on the background ([`src/backgrounds.rs`](src/backgrounds.rs)), and NVENC, VAAPI or x264 encodes the final MP4, with decoding, compositing and encoding overlapped. A 46 s 1080p60 test clip with zoom and background renders in about 14 s on an RTX 3050 laptop. When neither zoom nor background changes a pixel, the capture is only remuxed.
 
 ## Compared with other recorders
 
@@ -363,7 +402,13 @@ OBS and `gpu-screen-recorder` are excellent general-purpose recorders. HyperGSR 
 | [`src/gui.rs`](src/gui.rs) | GTK 4 Dynamic Island, Studio drawer and themes (`load_dynamic_island_css()`) |
 | [`src/cursor.rs`](src/cursor.rs) | DRM and X11 cursor readers, shake detection, click ripples |
 | [`src/zoom_engine.rs`](src/zoom_engine.rs) | Spring camera, auto-zoom modes and zoom-combo bindings |
-| [`src/encoder.rs`](src/encoder.rs) | Trajectory planner, auto-zoom rendering and NVENC/VAAPI encoding through FFmpeg |
+| [`src/encoder.rs`](src/encoder.rs) | Capture session (helper process, status, telemetry) and the trajectory planner |
+| [`src/ffmpeg.rs`](src/ffmpeg.rs) | Encoder detection (NVENC, VAAPI, x264) and FFmpeg argument sets |
+| [`src/studio_render.rs`](src/studio_render.rs) | NV12 zoom and background compositor, decode/composite/encode pipeline |
+| [`src/backgrounds.rs`](src/backgrounds.rs) | Background presets, image backgrounds, shadow and rounded-corner mask |
+| [`src/settings.rs`](src/settings.rs) | Persisted recorder settings (source, area, audio, quality, background) |
+| [`src/studio_panel.rs`](src/studio_panel.rs) | Record and background cards in the Studio drawer |
+| [`src/region_select.rs`](src/region_select.rs) | Full-screen overlay for choosing an area to record |
 | [`src/shaders.rs`](src/shaders.rs) | GLSL for cursor ripples and effects |
 | [`src/pw_portal_capture.c`](src/pw_portal_capture.c) | Standalone PipeWire + XDG portal capture helper |
 | [`src/web_ui.rs`](src/web_ui.rs) | Web Studio server (`--web`) |
@@ -378,7 +423,8 @@ OBS and `gpu-screen-recorder` are excellent general-purpose recorders. HyperGSR 
 - [x] Standalone PipeWire + portal + NVENC/VAAPI capture
 - [ ] On-screen keystroke overlay (`Ctrl+C`, `Super+Enter`)
 - [ ] Circular webcam picture-in-picture that follows the camera
-- [ ] Wallpaper padding and shadow frame around the recording
+- [x] Wallpaper padding and shadow frame around the recording
+- [x] Screen, window, or area capture with desktop audio and microphone
 - [ ] WebM / AV1 (`av1_nvenc`, `av1_vaapi`) and GIF export
 
 ## Contributing
@@ -396,5 +442,9 @@ Pull requests are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers setup, an
 If HyperGSR is useful to you, a star helps other Linux and Rust developers find it.
 
 ## License
+
+The interface uses [Inter](https://rsms.me/inter/) by Rasmus Andersson, bundled
+under the SIL Open Font License ([`assets/fonts/Inter-LICENSE.txt`](assets/fonts/Inter-LICENSE.txt)).
+
 
 [MIT](LICENSE)

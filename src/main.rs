@@ -1,13 +1,22 @@
+pub mod backgrounds;
 pub mod bundled;
 pub mod capture;
 pub mod compositor;
 pub mod cursor;
 pub mod decompiled_gsr;
 pub mod encoder;
+pub mod ffmpeg;
 pub mod gui;
+pub mod island_position;
+pub mod region_select;
+pub mod settings;
 pub mod shaders;
+pub mod shortcuts;
 pub mod state;
+pub mod studio_panel;
+pub mod studio_render;
 pub mod web_ui;
+pub mod x11_above;
 pub mod zoom_engine;
 
 use crate::state::{SharedStudioState, StudioState};
@@ -43,8 +52,33 @@ fn find_layer_shell_library() -> Option<PathBuf> {
     .find(|path| path.exists())
 }
 
+/// GNOME has no layer-shell, so a native Wayland island would sink below other
+/// windows; under XWayland it can ask to stay above them instead.
+fn gdk_backend() -> &'static str {
+    if let Ok(forced) = std::env::var("HYPERGSR_GDK_BACKEND") {
+        if forced == "x11" {
+            return "x11";
+        }
+        return "wayland";
+    }
+    let gnome = std::env::var("XDG_CURRENT_DESKTOP")
+        .is_ok_and(|d| d.split(':').any(|part| part.eq_ignore_ascii_case("gnome")));
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let x11 = std::env::var_os("DISPLAY").is_some();
+    if x11 && (gnome || !wayland) {
+        "x11"
+    } else {
+        "wayland"
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Bound to a desktop shortcut: start or stop the running recorder.
+    if args.iter().any(|a| a == "--toggle-recording") {
+        return shortcuts::toggle_running_recorder();
+    }
 
     // Ensure GTK4 initializes on native Wayland with libgtk4-layer-shell preloaded
     // so the Dynamic Island docks natively at the top notch with 32-bit RGBA transparent
@@ -53,6 +87,7 @@ fn main() -> anyhow::Result<()> {
         a == "--report"
             || a == "--export-demo"
             || a == "--record-seconds"
+            || a == "--render-capture"
             || a == "--web"
             || a == "--web-only"
     });
@@ -62,7 +97,7 @@ fn main() -> anyhow::Result<()> {
         let mut cmd = std::process::Command::new(exe);
         cmd.args(&args[1..])
             .env("HYPERGSR_LAYER_SHELL", "1")
-            .env("GDK_BACKEND", "wayland")
+            .env("GDK_BACKEND", gdk_backend())
             .env("GSK_RENDERER", "cairo");
         // gtk4-layer-shell must be loaded before libwayland-client, so it is preloaded
         // from wherever the distro, a /usr/local source build, or Flatpak installed it.
@@ -79,6 +114,9 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("Failed to exec with layer-shell: {err}");
     }
 
+    if !args.iter().any(|a| a == "--report" || a == "--export-demo") {
+        ffmpeg::warm_up();
+    }
     let state: SharedStudioState = Arc::new(Mutex::new(StudioState::new(1280, 720)));
     let web_port: u16 = 7878;
 
@@ -91,17 +129,59 @@ fn main() -> anyhow::Result<()> {
         print_banner(&state);
         let out_path = state.lock().start_recording()?;
         println!(
-            "● Recording live desktop via Zero-Copy PipeWire DMA-BUF + GPU for {secs:.1}s -> {}",
+            "● Recording the screen for {secs:.1}s -> {}",
             out_path.display()
         );
-        let steps = (secs * 25.0) as usize;
-        for _ in 0..steps {
-            state.lock().tick();
-            std::thread::sleep(std::time::Duration::from_millis(40));
+        // The clock starts with the first captured frame, after the portal.
+        let wait_start = std::time::Instant::now();
+        loop {
+            let mut g = state.lock();
+            g.tick();
+            if let Some(reason) = g.poll_capture_failure() {
+                drop(g);
+                let _ = state.lock().stop_recording();
+                anyhow::bail!("Recording failed: {reason}");
+            }
+            let elapsed = g.recording_start.map(|t| t.elapsed().as_secs_f32());
+            drop(g);
+            if elapsed.is_some_and(|e| e >= secs) {
+                break;
+            }
+            if elapsed.is_none() && wait_start.elapsed().as_secs() > 120 {
+                anyhow::bail!("Screen capture did not start within two minutes");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
         }
         if let Some(saved) = state.lock().stop_recording()? {
             println!("✔ Saved Zero-Copy GPU recording -> {}", saved.display());
         }
+        return Ok(());
+    }
+
+    // Re-render a raw capture with saved cursor telemetry and the current
+    // background settings: --render-capture <capture.mp4> <telemetry.json> <out.mp4>
+    if let Some(idx) = args.iter().position(|a| a == "--render-capture") {
+        let (Some(capture), Some(telemetry), Some(output)) =
+            (args.get(idx + 1), args.get(idx + 2), args.get(idx + 3))
+        else {
+            anyhow::bail!("usage: --render-capture <capture.mp4> <telemetry.json> <out.mp4>");
+        };
+        let events: Vec<encoder::RecordedZoomEvent> =
+            serde_json::from_str(&std::fs::read_to_string(telemetry)?)?;
+        let settings = state.lock().settings.clone();
+        let job = studio_render::RenderJob {
+            capture: PathBuf::from(capture),
+            output: PathBuf::from(output),
+            events,
+            auto_zoom: settings.auto_zoom,
+            region: settings.active_region(),
+            background: settings.background.clone(),
+            quality: settings.quality,
+            fps: settings.fps,
+        };
+        let started = std::time::Instant::now();
+        let saved = studio_render::render(&job, &std::sync::atomic::AtomicU32::new(0))?;
+        println!("✔ Rendered {} in {:.1}s", saved.display(), started.elapsed().as_secs_f32());
         return Ok(());
     }
 
@@ -260,6 +340,7 @@ mod tests {
                 cursor_y: cy,
                 clicked: (i % 350) == 40,
                 manual_lock: false,
+                off_capture: false,
             });
         }
 
@@ -377,6 +458,7 @@ mod tests {
                 cursor_y: 0.40,
                 clicked: false,
                 manual_lock: locked,
+                off_capture: false,
             });
         }
         let frames = build_smooth_60fps_camera_frames(&events, 8 * 60);

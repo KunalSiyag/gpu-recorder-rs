@@ -181,6 +181,8 @@ struct DrmCursorReader {
     prev_fb_id: std::sync::atomic::AtomicU64,
     held: parking_lot::Mutex<HeldPosition>,
     crtc_size_cache: parking_lot::Mutex<Option<(u32, (f32, f32))>>,
+    /// Pixel size of the display the cursor was last seen on.
+    cursor_output: parking_lot::Mutex<Option<(f32, f32)>>,
     get_obj_props: unsafe extern "C" fn(c_int, u32, u32) -> *mut DrmModeObjectProperties,
     free_obj_props: unsafe extern "C" fn(*mut DrmModeObjectProperties),
     get_prop: unsafe extern "C" fn(c_int, u32) -> *mut DrmModePropertyRes,
@@ -315,6 +317,7 @@ impl DrmCursorReader {
                         prev_fb_id: std::sync::atomic::AtomicU64::new(0),
                         held: parking_lot::Mutex::new(HeldPosition::default()),
                         crtc_size_cache: parking_lot::Mutex::new(None),
+                        cursor_output: parking_lot::Mutex::new(None),
                         get_obj_props,
                         free_obj_props,
                         get_prop,
@@ -408,6 +411,7 @@ impl DrmCursorReader {
                             FALLBACK_CRTC_SIZE
                         };
                         visible = Some(cursor_tip_normalized(cx, cy, hotspot, size));
+                        *self.cursor_output.lock() = (crtc_id != 0).then_some(size);
                         let old_fb = self
                             .prev_fb_id
                             .swap(fb_id, std::sync::atomic::Ordering::Relaxed);
@@ -612,6 +616,12 @@ impl CursorTracker {
     }
 
     /// Whether a real pointer source (DRM cursor plane or X11) was opened.
+    /// Pixel size of the display the hardware cursor is on, when the DRM
+    /// cursor plane is readable.
+    pub fn cursor_output_size(&self) -> Option<(f32, f32)> {
+        *self.drm_cursor.as_ref()?.cursor_output.lock()
+    }
+
     pub fn has_live_source(&self) -> bool {
         self.drm_cursor.is_some() || self.x11_conn.is_some()
     }

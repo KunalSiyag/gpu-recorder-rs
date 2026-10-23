@@ -26,6 +26,119 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icon-theme.svg", include_bytes!("../assets/icon-theme.svg")),
 ];
 
+/// Symbolic UI icons, drawn as filled shapes so GTK recolors them to the
+/// widget's text color in every theme and state.
+const SYMBOLIC_ICONS: &[(&str, &[u8])] = &[
+    (
+        "hgsr-area-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-area-symbolic.svg"),
+    ),
+    (
+        "hgsr-audio-both-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-audio-both-symbolic.svg"),
+    ),
+    (
+        "hgsr-audio-mic-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-audio-mic-symbolic.svg"),
+    ),
+    (
+        "hgsr-audio-off-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-audio-off-symbolic.svg"),
+    ),
+    (
+        "hgsr-audio-system-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-audio-system-symbolic.svg"),
+    ),
+    (
+        "hgsr-camera-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-camera-symbolic.svg"),
+    ),
+    (
+        "hgsr-check-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-check-symbolic.svg"),
+    ),
+    (
+        "hgsr-choose-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-choose-symbolic.svg"),
+    ),
+    (
+        "hgsr-close-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-close-symbolic.svg"),
+    ),
+    (
+        "hgsr-ctrl-click-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-ctrl-click-symbolic.svg"),
+    ),
+    (
+        "hgsr-double-click-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-double-click-symbolic.svg"),
+    ),
+    (
+        "hgsr-folder-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-folder-symbolic.svg"),
+    ),
+    (
+        "hgsr-keyboard-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-keyboard-symbolic.svg"),
+    ),
+    (
+        "hgsr-lock-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-lock-symbolic.svg"),
+    ),
+    (
+        "hgsr-moon-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-moon-symbolic.svg"),
+    ),
+    (
+        "hgsr-mouse-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-mouse-symbolic.svg"),
+    ),
+    (
+        "hgsr-play-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-play-symbolic.svg"),
+    ),
+    (
+        "hgsr-pulse-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-pulse-symbolic.svg"),
+    ),
+    (
+        "hgsr-record-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-record-symbolic.svg"),
+    ),
+    (
+        "hgsr-screen-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-screen-symbolic.svg"),
+    ),
+    (
+        "hgsr-shake-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-shake-symbolic.svg"),
+    ),
+    (
+        "hgsr-shortcut-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-shortcut-symbolic.svg"),
+    ),
+    (
+        "hgsr-sun-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-sun-symbolic.svg"),
+    ),
+    (
+        "hgsr-toggle-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-toggle-symbolic.svg"),
+    ),
+    (
+        "hgsr-wide-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-wide-symbolic.svg"),
+    ),
+    (
+        "hgsr-window-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-window-symbolic.svg"),
+    ),
+];
+
+/// Inter (SIL Open Font License, see assets/fonts/Inter-LICENSE.txt),
+/// subset to Latin.
+static UI_FONT: &[u8] = include_bytes!("../assets/fonts/InterVariable.ttf");
+
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -44,6 +157,10 @@ fn xdg_base(value: Option<std::ffi::OsString>, home: &Path, fallback: &str) -> P
 
 pub fn config_dir() -> PathBuf {
     xdg_base(std::env::var_os("XDG_CONFIG_HOME"), &home_dir(), ".config").join("hypergsr")
+}
+
+pub fn cache_dir() -> PathBuf {
+    xdg_base(std::env::var_os("XDG_CACHE_HOME"), &home_dir(), ".cache").join("hypergsr")
 }
 
 fn data_dir() -> PathBuf {
@@ -65,8 +182,10 @@ fn materialize_in(base: &Path, relative: &Path, bytes: &[u8], mode: u32) -> Opti
         return None;
     }
     let path = base.join(relative);
-    // The directory is versioned, so a file of the right size is this build's copy.
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64) {
+    // Development builds keep the version, so compare contents, not just size.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64)
+        && std::fs::read(&path).is_ok_and(|existing| existing == bytes)
+    {
         return Some(path);
     }
     std::fs::create_dir_all(path.parent()?).ok()?;
@@ -79,6 +198,20 @@ fn materialize_in(base: &Path, relative: &Path, bytes: &[u8], mode: u32) -> Opti
 
 pub fn pw_capture_helper() -> Option<PathBuf> {
     materialize(Path::new("hypergsr-pw-capture"), PW_CAPTURE_HELPER, 0o755)
+}
+
+/// Directory holding the symbolic icons, for `IconTheme::add_search_path`.
+pub fn symbolic_icon_dir() -> Option<PathBuf> {
+    let mut dir = None;
+    for (name, bytes) in SYMBOLIC_ICONS {
+        let path = materialize(&Path::new("icons").join(name), bytes, 0o644)?;
+        dir = path.parent().map(Path::to_path_buf);
+    }
+    dir
+}
+
+pub fn ui_font() -> Option<PathBuf> {
+    materialize(Path::new("fonts/InterVariable.ttf"), UI_FONT, 0o644)
 }
 
 pub fn icon(name: &str) -> Option<PathBuf> {
