@@ -3,14 +3,17 @@ use crate::compositor::{FrameCompositor, FrameStyleConfig};
 use crate::cursor::{CursorConfig, CursorSample, CursorTracker, KeystrokeOverlay};
 use crate::decompiled_gsr::GsrDecompiledReport;
 use crate::encoder::{
-    apply_hardware_autozoom_pass, export_showcase_recording, ActiveEncoderSession,
-    HardwareEncoderBackend,
+    export_showcase_recording, ActiveEncoderSession, CaptureOptions, HardwareEncoderBackend,
+    RecordedZoomEvent,
 };
+use crate::settings::{CaptureSource, RecorderSettings};
+use crate::studio_render::{self, RenderJob};
 use crate::zoom_engine::{CameraViewport, ZoomConfig, ZoomEngine, ZoomKeyframe};
 use anyhow::Result;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -53,6 +56,13 @@ pub struct StudioState {
     pub output_dir: PathBuf,
     pub videos_dir: PathBuf,
     pub click_count: u64,
+    pub settings: RecorderSettings,
+    /// Show the portal picker on the next recording instead of reusing the
+    /// remembered screen or window.
+    pub repick_source: bool,
+    /// Settings the running recording was started with; changing the drawer
+    /// mid-recording only affects the next one.
+    recording_settings: Option<RecorderSettings>,
     /// Lazy-allocated buffers used ONLY when `--web` requests a rendered JPEG frame
     lazy_web_buffers: Option<(ScreenCapturer, FrameBuffer, FrameBuffer)>,
 }
@@ -67,18 +77,21 @@ impl StudioState {
             .join("recordings");
         std::fs::create_dir_all(&output_dir).ok();
 
-        let videos_dir = crate::bundled::home_dir().join("Videos");
+        let settings = RecorderSettings::load();
+        let videos_dir = settings.recordings_dir();
         std::fs::create_dir_all(&videos_dir).ok();
+        let mut zoom_cfg = ZoomConfig::default();
+        zoom_cfg.enabled = settings.auto_zoom;
 
         Self {
             start_instant: Instant::now(),
             recording_start: None,
             capture_mode: CaptureSourceMode::AutoHybrid,
             encoder_backend: HardwareEncoderBackend::GsrZeroCopyGpu,
-            target_fps: 60,
-            record_audio: true,
-            auto_apply_zoom_on_stop: true,
-            zoom_cfg: ZoomConfig::default(),
+            target_fps: settings.fps,
+            record_audio: settings.audio != crate::settings::AudioMode::Off,
+            auto_apply_zoom_on_stop: settings.auto_zoom,
+            zoom_cfg,
             cursor_cfg: CursorConfig::default(),
             style_cfg: FrameStyleConfig::default(),
             cursor_tracker: CursorTracker::new(),
@@ -92,6 +105,9 @@ impl StudioState {
             output_dir,
             videos_dir,
             click_count: 0,
+            settings,
+            repick_source: false,
+            recording_settings: None,
             lazy_web_buffers: None,
         }
     }
@@ -181,7 +197,28 @@ impl StudioState {
         self.last_viewport = viewport;
 
         let manual_locked = self.zoom_engine.manual_locked;
-        let rec_elapsed = self.recording_elapsed_sec();
+        // Video time zero is the first captured frame, which can be seconds
+        // after Record while the portal starts; telemetry waits for it.
+        if self.recording_start.is_none() {
+            self.recording_start = self.encoder_session.as_ref().and_then(|s| s.ready_at());
+        }
+        let Some(rec_start) = self.recording_start else {
+            return;
+        };
+        let rec_elapsed = rec_start.elapsed().as_secs_f32();
+        // With several displays, a cursor on another one must not steer the zoom.
+        let records_monitor = self
+            .recording_settings
+            .as_ref()
+            .is_some_and(|s| s.source != CaptureSource::Window);
+        let off_capture = records_monitor
+            && match (
+                self.encoder_session.as_ref().and_then(|s| s.capture_size()),
+                self.cursor_tracker.cursor_output_size(),
+            ) {
+                (Some(capture), Some(output)) => !crate::encoder::cursor_on_capture(capture, output),
+                _ => false,
+            };
         if let Some(ref mut session) = self.encoder_session {
             session.record_zoom_telemetry(
                 rec_elapsed,
@@ -192,6 +229,7 @@ impl StudioState {
                 sample.smooth_y,
                 clicked_now,
                 manual_locked,
+                off_capture,
             );
         }
     }
@@ -247,56 +285,78 @@ impl StudioState {
             self.stop_recording()?;
         }
         let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-        let filename = format!("HyperGSR_{ts}.mp4");
-        let out_path = self.videos_dir.join(&filename);
-
-        let session = ActiveEncoderSession::start_zero_copy_gpu(
-            &out_path,
-            self.target_fps,
-            self.record_audio,
-        )
-        .or_else(|_| {
-            ActiveEncoderSession::start(
-                &out_path,
-                1920,
-                1080,
-                self.target_fps,
-                self.encoder_backend,
-            )
-        })?;
-
-        self.recording_start = Some(Instant::now());
+        // Two recordings in one second must not share files.
+        let capture_path = (1..)
+            .map(|n| {
+                let suffix = if n == 1 { String::new() } else { format!("-{n}") };
+                self.videos_dir.join(format!("HyperGSR_{ts}{suffix}{CAPTURE_SUFFIX}"))
+            })
+            .find(|p| {
+                // Claim the name now; FFmpeg may not create the file for a while.
+                !final_path(p).exists()
+                    && std::fs::OpenOptions::new().write(true).create_new(true).open(p).is_ok()
+            })
+            .expect("an unused file name");
+        let settings = &self.settings;
+        let options = CaptureOptions {
+            fps: settings.fps,
+            quality: settings.quality,
+            audio: settings.audio,
+            source: settings.source,
+            region: settings.active_region(),
+            show_cursor: settings.show_cursor,
+            repick: self.repick_source,
+        };
+        let session = ActiveEncoderSession::start_capture(&capture_path, &options)?;
+        self.repick_source = false;
+        self.recording_settings = Some(settings.clone());
+        self.target_fps = settings.fps;
+        self.recording_start = None;
         self.encoder_session = Some(session);
         self.cursor_tracker
             .push_keystroke("● REC Started (Zero-Copy GPU)", self.now_ms());
-        Ok(out_path)
+        Ok(capture_path)
     }
 
-    /// Stops the active capture process immediately and returns `(raw_mp4_path, zoom_events, apply_zoom)`
-    /// so the heavy NVENC auto-zoom pass can run on a background worker thread without holding the mutex.
-    pub fn stop_recording_fast(&mut self) -> Result<Option<(PathBuf, Vec< crate::encoder::RecordedZoomEvent >, bool)>> {
+    /// `Some(reason)` when the running capture died on its own (for example
+    /// the share was revoked or the encoder failed).
+    pub fn poll_capture_failure(&mut self) -> Option<String> {
+        self.encoder_session.as_mut()?.poll_failure()
+    }
+
+    /// Detaches the running capture so it can be finalized and rendered on a
+    /// worker thread with [`StopJob::complete`], keeping the UI responsive.
+    pub fn take_recording(&mut self) -> Option<StopJob> {
+        let session = self.encoder_session.take()?;
         self.recording_start = None;
-        if let Some(session) = self.encoder_session.take() {
-            let (path, zoom_events) = session.finish()?;
-            self.last_saved_file = Some(path.display().to_string());
-            self.cursor_tracker
-                .push_keystroke("✔ Saved GPU Recording", self.now_ms());
-            return Ok(Some((path, zoom_events, self.auto_apply_zoom_on_stop)));
-        }
-        Ok(None)
+        self.cursor_tracker
+            .push_keystroke("✔ Saved GPU Recording", self.now_ms());
+        let settings = self
+            .recording_settings
+            .take()
+            .unwrap_or_else(|| self.settings.clone());
+        // The background is presentation only, so the latest choice applies.
+        let settings = RecorderSettings {
+            background: self.settings.background.clone(),
+            ..settings
+        };
+        Some(StopJob {
+            session,
+            auto_zoom: self.auto_apply_zoom_on_stop
+                && settings.auto_zoom
+                && settings.source != CaptureSource::Window,
+            settings,
+        })
     }
 
+    /// Stops and renders the recording on the calling thread.
     pub fn stop_recording(&mut self) -> Result<Option<PathBuf>> {
-        if let Some((path, zoom_events, do_zoom)) = self.stop_recording_fast()? {
-            let final_path = if do_zoom && !zoom_events.is_empty() {
-                apply_hardware_autozoom_pass(&path, &zoom_events).unwrap_or(path)
-            } else {
-                path
-            };
-            self.last_saved_file = Some(final_path.display().to_string());
-            return Ok(Some(final_path));
-        }
-        Ok(None)
+        let Some(job) = self.take_recording() else {
+            return Ok(None);
+        };
+        let final_path = job.complete(&AtomicU32::new(0))?;
+        self.last_saved_file = Some(final_path.display().to_string());
+        Ok(Some(final_path))
     }
 
     pub fn render_instant_demo_mp4(&mut self) -> Result<(PathBuf, u64, String)> {
@@ -339,5 +399,104 @@ impl StudioState {
             style_cfg: self.style_cfg.clone(),
             rss_memory_mb: Self::read_rss_mb(),
         }
+    }
+}
+
+/// A stopped recording waiting to be finalized and rendered.
+pub struct StopJob {
+    session: ActiveEncoderSession,
+    auto_zoom: bool,
+    settings: RecorderSettings,
+}
+
+impl StopJob {
+    /// Finalizes the capture, applies zoom and background, and returns the
+    /// MP4 to show the user. A failed render falls back to the plain capture,
+    /// so a recording is never lost to a post-processing error.
+    pub fn complete(self, progress: &AtomicU32) -> Result<PathBuf> {
+        let done = self.session.finish_capture();
+        let capture = done.path;
+        if !capture.exists() || std::fs::metadata(&capture).is_ok_and(|m| m.len() == 0) {
+            let _ = std::fs::remove_file(&capture);
+            anyhow::bail!(done.error.unwrap_or_else(|| "nothing was recorded".to_string()));
+        }
+        if let Some(err) = &done.error {
+            eprintln!("[HyperGSR] capture ended with an error: {err}; keeping what was recorded");
+        }
+        save_telemetry(&capture, &done.zoom_events);
+
+        let output = final_path(&capture);
+        let job = RenderJob {
+            capture: capture.clone(),
+            output: output.clone(),
+            events: done.zoom_events,
+            auto_zoom: self.auto_zoom,
+            region: self.settings.active_region(),
+            background: self.settings.background.clone(),
+            quality: self.settings.quality,
+            fps: self.settings.fps,
+        };
+        let result = studio_render::render(&job, progress).or_else(|err| {
+            eprintln!("[HyperGSR] {err:#}; saving the recording without effects");
+            crate::ffmpeg::remux_to_mp4(&capture, &output).map(|_| output.clone())
+        });
+        match result {
+            Ok(path) => {
+                let _ = std::fs::remove_file(&capture);
+                Ok(path)
+            }
+            // The fragmented capture plays as is; hand it over under the final name.
+            Err(err) => {
+                eprintln!("[HyperGSR] {err:#}; keeping the raw capture");
+                let _ = std::fs::remove_file(&output);
+                Ok(std::fs::rename(&capture, &output).map_or(capture, |_| output))
+            }
+        }
+    }
+}
+
+/// Suffix of the raw capture next to where the final MP4 will go.
+const CAPTURE_SUFFIX: &str = ".capture.mp4";
+
+/// `HyperGSR_<time>.capture.mp4` becomes `HyperGSR_<time>.mp4`.
+fn final_path(capture: &std::path::Path) -> PathBuf {
+    let name = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = name.strip_suffix(CAPTURE_SUFFIX).unwrap_or(&name);
+    capture.with_file_name(format!("{}.mp4", stem.trim_end_matches(".mp4")))
+}
+
+/// Keeps the cursor telemetry of recent recordings for debugging and re-renders.
+fn save_telemetry(capture: &std::path::Path, events: &[RecordedZoomEvent]) {
+    let dir = crate::bundled::cache_dir().join("telemetry");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let name = final_path(capture)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "recording".to_string());
+    if let Ok(json) = serde_json::to_string(events) {
+        let _ = std::fs::write(dir.join(format!("{name}.json")), json);
+    }
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok()).collect())
+        .unwrap_or_default();
+    if files.len() > 20 {
+        files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+        for old in &files[..files.len() - 20] {
+            let _ = std::fs::remove_file(old.path());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_files_map_to_their_final_name() {
+        let p = std::path::Path::new("/v/HyperGSR_2026-10-23_01-02-03.capture.mp4");
+        assert_eq!(final_path(p), PathBuf::from("/v/HyperGSR_2026-10-23_01-02-03.mp4"));
+        assert_eq!(final_path(std::path::Path::new("/v/a.mp4")), PathBuf::from("/v/a.mp4"));
     }
 }

@@ -23,6 +23,8 @@ finish-args:
   # Web Studio listens on 127.0.0.1:7878.
   - --share=network
   - --filesystem=xdg-videos
+  # Desktop audio and microphone capture through PipeWire's Pulse server.
+  - --socket=pulseaudio
 cleanup:
   - /include
   - /lib/pkgconfig
@@ -96,6 +98,7 @@ modules:
       - --enable-nvenc
       - --enable-vaapi
       - --enable-libdrm
+      - --enable-libpulse
     cleanup:
       - /share/ffmpeg
     sources:

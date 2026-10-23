@@ -1,4 +1,4 @@
-use crate::encoder::apply_hardware_autozoom_pass;
+use crate::island_position::{self, IslandPos, DEFAULT_TOP_MARGIN};
 use crate::state::SharedStudioState;
 use crate::zoom_engine::{AutoZoomMode, ComboActionMode, ZoomComboBinding};
 use glib::object::ObjectType;
@@ -7,12 +7,14 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, DrawingArea,
     EventControllerKey, EventControllerMotion, EventControllerScroll, EventControllerScrollFlags,
-    GestureClick, Image, Label, Orientation,
+    GestureClick, GestureDrag, Image, Label, Orientation,
 };
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,12 +47,45 @@ fn asset_path(name: &str) -> PathBuf {
     crate::bundled::icon(name).unwrap_or(cwd_asset)
 }
 
+/// Makes the bundled Inter font available to this process through
+/// fontconfig, before GTK creates its font map.
+fn register_ui_font() {
+    let Some(path) = crate::bundled::ui_font() else {
+        return;
+    };
+    let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return;
+    };
+    unsafe {
+        let lib = CString::new("libfontconfig.so.1").unwrap();
+        let handle = libc::dlopen(lib.as_ptr(), libc::RTLD_LAZY);
+        if handle.is_null() {
+            return;
+        }
+        let name = CString::new("FcConfigAppFontAddFile").unwrap();
+        let sym = libc::dlsym(handle, name.as_ptr());
+        if sym.is_null() {
+            return;
+        }
+        type AddFontFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+        let add: AddFontFn = std::mem::transmute(sym);
+        // A null config means the current one, which Pango uses.
+        add(std::ptr::null_mut(), path.as_ptr());
+    }
+}
+
 pub fn launch_gtk_ui(state: SharedStudioState, _web_port: u16) {
+    register_ui_font();
     let app = Application::builder()
-        .application_id("io.github.KunalSiyag.gpu_recorder_rs")
+        .application_id(crate::shortcuts::APP_ID)
         .build();
 
     app.connect_activate(move |app| {
+        // Launching HyperGSR again shows the island that is already open.
+        if let Some(window) = app.windows().into_iter().find(|w| w.title().as_deref() == Some(ISLAND_WINDOW_TITLE)) {
+            window.present();
+            return;
+        }
         build_dynamic_island(app, state.clone());
     });
 
@@ -58,8 +93,65 @@ pub fn launch_gtk_ui(state: SharedStudioState, _web_port: u16) {
     app.run_with_args(&empty_args);
 }
 
-fn init_wayland_layer_shell(window: &ApplicationWindow) -> bool {
-    unsafe {
+const LAYER_EDGE_LEFT: c_int = 0;
+const LAYER_EDGE_TOP: c_int = 2;
+
+/// Runtime handle to the dlopen'ed gtk4-layer-shell calls that position the island.
+#[derive(Clone, Copy)]
+struct LayerShell {
+    window: *mut c_void,
+    set_anchor: unsafe extern "C" fn(*mut c_void, c_int, c_int),
+    set_margin: unsafe extern "C" fn(*mut c_void, c_int, c_int),
+}
+
+impl LayerShell {
+    /// `None` is the default spot: centered under the top edge.
+    fn place(&self, pos: Option<IslandPos>) {
+        unsafe {
+            match pos {
+                Some(p) => {
+                    (self.set_anchor)(self.window, LAYER_EDGE_LEFT, 1);
+                    (self.set_anchor)(self.window, LAYER_EDGE_TOP, 1);
+                    (self.set_margin)(self.window, LAYER_EDGE_LEFT, p.x);
+                    (self.set_margin)(self.window, LAYER_EDGE_TOP, p.y);
+                }
+                None => {
+                    (self.set_anchor)(self.window, LAYER_EDGE_LEFT, 0);
+                    (self.set_margin)(self.window, LAYER_EDGE_LEFT, 0);
+                    (self.set_anchor)(self.window, LAYER_EDGE_TOP, 1);
+                    (self.set_margin)(self.window, LAYER_EDGE_TOP, DEFAULT_TOP_MARGIN);
+                }
+            }
+        }
+    }
+}
+
+/// gtk4-layer-shell entry points, resolved once at runtime so the recorder
+/// still starts on desktops without the library.
+pub(crate) struct LayerApi {
+    pub init_for_window: unsafe extern "C" fn(*mut c_void),
+    pub set_layer: unsafe extern "C" fn(*mut c_void, c_int),
+    pub set_anchor: unsafe extern "C" fn(*mut c_void, c_int, c_int),
+    pub set_margin: unsafe extern "C" fn(*mut c_void, c_int, c_int),
+    pub set_exclusive_zone: unsafe extern "C" fn(*mut c_void, c_int),
+    pub set_keyboard_mode: unsafe extern "C" fn(*mut c_void, c_int),
+    pub set_namespace: unsafe extern "C" fn(*mut c_void, *const c_char),
+}
+
+// SAFETY: plain C function pointers into a library that stays loaded.
+unsafe impl Send for LayerApi {}
+unsafe impl Sync for LayerApi {}
+
+/// `None` when gtk4-layer-shell is missing or the compositor lacks
+/// `zwlr_layer_shell_v1` (GNOME, X11).
+pub(crate) fn layer_api() -> Option<&'static LayerApi> {
+    static API: std::sync::OnceLock<Option<LayerApi>> = std::sync::OnceLock::new();
+    API.get_or_init(|| unsafe {
+        let wayland = gdk4::Display::default()
+            .is_some_and(|d| d.type_().name() == "GdkWaylandDisplay");
+        if !wayland {
+            return None;
+        }
         let path = CString::new("/usr/local/lib/x86_64-linux-gnu/libgtk4-layer-shell.so.0").unwrap();
         let mut handle = libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
         if handle.is_null() {
@@ -67,58 +159,243 @@ fn init_wayland_layer_shell(window: &ApplicationWindow) -> bool {
             handle = libc::dlopen(fallback.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
         }
         if handle.is_null() {
-            return false;
+            return None;
         }
-
-        type IsSupportedFn = unsafe extern "C" fn() -> c_int;
-        type InitForWinFn = unsafe extern "C" fn(*mut c_void);
-        type SetLayerFn = unsafe extern "C" fn(*mut c_void, c_int);
-        type SetAnchorFn = unsafe extern "C" fn(*mut c_void, c_int, c_int);
-        type SetMarginFn = unsafe extern "C" fn(*mut c_void, c_int, c_int);
-        type SetExclZoneFn = unsafe extern "C" fn(*mut c_void, c_int);
-        type SetKbModeFn = unsafe extern "C" fn(*mut c_void, c_int);
-        type SetNamespaceFn = unsafe extern "C" fn(*mut c_void, *const c_char);
-
         let sym = |name: &str| -> *mut c_void {
             let cs = CString::new(name).unwrap();
             libc::dlsym(handle, cs.as_ptr())
         };
-
-        let is_sup_ptr = sym("gtk_layer_is_supported");
-        let init_ptr = sym("gtk_layer_init_for_window");
-        if is_sup_ptr.is_null() || init_ptr.is_null() {
-            return false;
+        let names = [
+            "gtk_layer_is_supported",
+            "gtk_layer_init_for_window",
+            "gtk_layer_set_layer",
+            "gtk_layer_set_anchor",
+            "gtk_layer_set_margin",
+            "gtk_layer_set_exclusive_zone",
+            "gtk_layer_set_keyboard_mode",
+            "gtk_layer_set_namespace",
+        ];
+        if names.iter().any(|name| sym(name).is_null()) {
+            return None;
         }
-
-        let is_supported: IsSupportedFn = std::mem::transmute(is_sup_ptr);
+        type IsSupportedFn = unsafe extern "C" fn() -> c_int;
+        let is_supported: IsSupportedFn = std::mem::transmute(sym("gtk_layer_is_supported"));
         if is_supported() == 0 {
-            return false;
+            return None;
         }
+        Some(LayerApi {
+            init_for_window: std::mem::transmute(sym("gtk_layer_init_for_window")),
+            set_layer: std::mem::transmute(sym("gtk_layer_set_layer")),
+            set_anchor: std::mem::transmute(sym("gtk_layer_set_anchor")),
+            set_margin: std::mem::transmute(sym("gtk_layer_set_margin")),
+            set_exclusive_zone: std::mem::transmute(sym("gtk_layer_set_exclusive_zone")),
+            set_keyboard_mode: std::mem::transmute(sym("gtk_layer_set_keyboard_mode")),
+            set_namespace: std::mem::transmute(sym("gtk_layer_set_namespace")),
+        })
+    })
+    .as_ref()
+}
 
-        let init_for_window: InitForWinFn = std::mem::transmute(init_ptr);
-        let set_layer: SetLayerFn = std::mem::transmute(sym("gtk_layer_set_layer"));
-        let set_anchor: SetAnchorFn = std::mem::transmute(sym("gtk_layer_set_anchor"));
-        let set_margin: SetMarginFn = std::mem::transmute(sym("gtk_layer_set_margin"));
-        let set_excl: SetExclZoneFn = std::mem::transmute(sym("gtk_layer_set_exclusive_zone"));
-        let set_kb: SetKbModeFn = std::mem::transmute(sym("gtk_layer_set_keyboard_mode"));
-        let set_ns: SetNamespaceFn = std::mem::transmute(sym("gtk_layer_set_namespace"));
-
+fn init_wayland_layer_shell(window: &ApplicationWindow) -> Option<LayerShell> {
+    let api = layer_api()?;
+    unsafe {
         let win_ptr = window.as_ptr() as *mut c_void;
-
-        init_for_window(win_ptr);
+        (api.init_for_window)(win_ptr);
         let ns = CString::new("hypergsr-dynamic-island").unwrap();
-        set_ns(win_ptr, ns.as_ptr());
+        (api.set_namespace)(win_ptr, ns.as_ptr());
 
-        set_layer(win_ptr, 3); // OVERLAY
-        set_anchor(win_ptr, 0, 0);
-        set_anchor(win_ptr, 1, 0);
-        set_anchor(win_ptr, 2, 1); // TOP CENTER
-        set_anchor(win_ptr, 3, 0);
-        set_margin(win_ptr, 2, 6);
-        set_excl(win_ptr, -1);
-        set_kb(win_ptr, 2); // ON_DEMAND
-        true
+        (api.set_layer)(win_ptr, 3); // OVERLAY: above every window, fullscreen ones included
+        (api.set_anchor)(win_ptr, 1, 0);
+        (api.set_anchor)(win_ptr, 3, 0);
+        (api.set_exclusive_zone)(win_ptr, -1);
+        (api.set_keyboard_mode)(win_ptr, 2); // ON_DEMAND
+        let layer = LayerShell {
+            window: win_ptr,
+            set_anchor: api.set_anchor,
+            set_margin: api.set_margin,
+        };
+        layer.place(None);
+        Some(layer)
     }
+}
+
+fn monitor_size(window: &ApplicationWindow) -> Option<(i32, i32)> {
+    let surface = window.surface()?;
+    let monitor = WidgetExt::display(window).monitor_at_surface(&surface)?;
+    let geometry = monitor.geometry();
+    Some((geometry.width(), geometry.height()))
+}
+
+/// Logical height of the island's monitor, or of the first monitor before
+/// the surface has been placed on one.
+fn screen_height(window: &ApplicationWindow) -> i32 {
+    monitor_size(window)
+        .map(|(_, h)| h)
+        .or_else(|| {
+            let monitors = WidgetExt::display(window).monitors();
+            let first = monitors.item(0)?.downcast::<gdk4::Monitor>().ok()?;
+            Some(first.geometry().height())
+        })
+        .unwrap_or(1080)
+}
+
+fn island_size(window: &ApplicationWindow) -> (i32, i32) {
+    (window.width().max(1), window.height().max(1))
+}
+
+/// Lets the user drag the island by `handle`. Layer-shell surfaces cannot be
+/// moved by the compositor, so the drag rewrites the surface margins instead;
+/// other shells get a regular compositor move. Returns a callback that pulls
+/// the island back on screen after it changes size.
+fn install_island_drag(
+    window: &ApplicationWindow,
+    handle: &GtkBox,
+    layer: Option<LayerShell>,
+) -> Rc<dyn Fn()> {
+    handle.set_cursor_from_name(Some("grab"));
+    handle.set_tooltip_text(Some("Drag to move · Double-click to re-center"));
+    let drag = GestureDrag::new();
+    drag.set_button(gdk4::BUTTON_PRIMARY);
+
+    let Some(layer) = layer else {
+        let win = window.clone();
+        let handle_ref = handle.clone();
+        drag.connect_drag_begin(move |gesture, x, y| {
+            let Some(toplevel) = win
+                .surface()
+                .and_then(|s| s.dynamic_cast::<gdk4::Toplevel>().ok())
+            else {
+                return;
+            };
+            let Some(device) = gesture.device() else {
+                return;
+            };
+            let point = handle_ref
+                .compute_point(&win, &gtk4::graphene::Point::new(x as f32, y as f32))
+                .unwrap_or_else(|| gtk4::graphene::Point::new(x as f32, y as f32));
+            let (sx, sy) = win.surface_transform();
+            toplevel.begin_move(
+                &device,
+                gesture.current_button() as i32,
+                point.x() as f64 + sx,
+                point.y() as f64 + sy,
+                gesture.current_event_time(),
+            );
+            gesture.reset();
+        });
+        handle.add_controller(drag);
+        return Rc::new(|| {});
+    };
+
+    let pos: Rc<Cell<Option<IslandPos>>> = Rc::new(Cell::new(island_position::load()));
+    layer.place(pos.get());
+
+    // Drag offsets are relative to where the compositor last put the surface,
+    // which lags the margins we request by one frame.
+    let applied = Rc::new(Cell::new(IslandPos { x: 0, y: 0 }));
+    let requested = Rc::new(Cell::new(IslandPos { x: 0, y: 0 }));
+    {
+        let applied = applied.clone();
+        let requested = requested.clone();
+        window.connect_realize(move |win| {
+            if let Some(clock) = win.frame_clock() {
+                let applied = applied.clone();
+                let requested = requested.clone();
+                clock.connect_after_paint(move |_| applied.set(requested.get()));
+            }
+        });
+    }
+
+    let keep_on_screen: Rc<dyn Fn()> = {
+        let win = window.clone();
+        let pos = pos.clone();
+        let applied = applied.clone();
+        let requested = requested.clone();
+        Rc::new(move || {
+            let (Some(current), Some(monitor)) = (pos.get(), monitor_size(&win)) else {
+                return;
+            };
+            let clamped = island_position::clamp(current, island_size(&win), monitor);
+            if clamped != current {
+                pos.set(Some(clamped));
+                applied.set(clamped);
+                requested.set(clamped);
+                layer.place(Some(clamped));
+            }
+        })
+    };
+    {
+        let keep_on_screen = keep_on_screen.clone();
+        window.connect_map(move |_| {
+            let keep_on_screen = keep_on_screen.clone();
+            glib::idle_add_local_once(move || keep_on_screen());
+        });
+    }
+
+    {
+        let win = window.clone();
+        let pos = pos.clone();
+        let applied = applied.clone();
+        let requested = requested.clone();
+        let handle_ref = handle.clone();
+        drag.connect_drag_begin(move |_, _, _| {
+            let current = pos.get().unwrap_or_else(|| {
+                let (width, _) = island_size(&win);
+                let monitor_width = monitor_size(&win).map_or(width, |m| m.0);
+                island_position::centered(width, monitor_width)
+            });
+            pos.set(Some(current));
+            applied.set(current);
+            requested.set(current);
+            layer.place(Some(current));
+            handle_ref.set_cursor_from_name(Some("grabbing"));
+        });
+    }
+    {
+        let win = window.clone();
+        let pos = pos.clone();
+        drag.connect_drag_update(move |_, dx, dy| {
+            let base = applied.get();
+            let mut target = IslandPos {
+                x: base.x + dx.round() as i32,
+                y: base.y + dy.round() as i32,
+            };
+            if let Some(monitor) = monitor_size(&win) {
+                target = island_position::clamp(target, island_size(&win), monitor);
+            }
+            if target != requested.get() {
+                requested.set(target);
+                pos.set(Some(target));
+                layer.place(Some(target));
+            }
+        });
+    }
+    {
+        let pos = pos.clone();
+        let handle_ref = handle.clone();
+        drag.connect_drag_end(move |_, _, _| {
+            handle_ref.set_cursor_from_name(Some("grab"));
+            if let Some(p) = pos.get() {
+                if let Err(err) = island_position::save(p) {
+                    eprintln!("[HyperGSR] Could not save island position: {err}");
+                }
+            }
+        });
+    }
+    handle.add_controller(drag);
+
+    let recenter = GestureClick::new();
+    recenter.set_button(gdk4::BUTTON_PRIMARY);
+    recenter.connect_pressed(move |_, n_press, _, _| {
+        if n_press == 2 {
+            pos.set(None);
+            layer.place(None);
+            island_position::forget();
+        }
+    });
+    handle.add_controller(recenter);
+
+    keep_on_screen
 }
 
 fn load_dynamic_island_css() {
@@ -136,7 +413,8 @@ fn load_dynamic_island_css() {
             box-shadow: none;
             outline: none;
             color: #f4f4f6;
-            font-family: "Inter", "SF Pro Display", system-ui, sans-serif;
+            font-family: "Inter Variable", "Inter", system-ui, sans-serif;
+            font-feature-settings: "cv11", "ss03";
         }
 
         /* =================================================================
@@ -176,7 +454,8 @@ fn load_dynamic_island_css() {
             letter-spacing: -0.2px;
         }
         .island-timer-rec {
-            font-family: "JetBrains Mono", monospace;
+            font-family: "Inter Variable", "Inter", sans-serif;
+            font-feature-settings: "tnum", "cv11";
             font-size: 11.5px;
             font-weight: 800;
             color: #fb7185;
@@ -206,7 +485,8 @@ fn load_dynamic_island_css() {
             background-color: rgba(99, 102, 241, 0.14);
             border: 1px solid rgba(129, 140, 248, 0.30);
             color: #c7d2fe;
-            font-family: "JetBrains Mono", monospace;
+            font-family: "Inter Variable", "Inter", sans-serif;
+            font-feature-settings: "tnum", "cv11";
             font-size: 10.5px;
             font-weight: 700;
             padding: 4px 10px;
@@ -215,7 +495,8 @@ fn load_dynamic_island_css() {
             background-color: rgba(16, 185, 129, 0.18);
             border: 1px solid rgba(52, 211, 153, 0.48);
             color: #6ee7b7;
-            font-family: "JetBrains Mono", monospace;
+            font-family: "Inter Variable", "Inter", sans-serif;
+            font-feature-settings: "tnum", "cv11";
             font-size: 10.5px;
             font-weight: 800;
             padding: 4px 10px;
@@ -293,7 +574,8 @@ fn load_dynamic_island_css() {
         }
 
         .coord-badge {
-            font-family: "JetBrains Mono", monospace;
+            font-family: "Inter Variable", "Inter", sans-serif;
+            font-feature-settings: "tnum", "cv11";
             font-size: 9.5px;
             font-weight: 700;
             color: #34d399;
@@ -367,7 +649,8 @@ fn load_dynamic_island_css() {
             border-top: 1px solid rgba(255, 255, 255, 0.07);
             padding-top: 6px;
             margin-top: 2px;
-            font-family: "JetBrains Mono", monospace;
+            font-family: "Inter Variable", "Inter", sans-serif;
+            font-feature-settings: "tnum", "cv11";
             font-size: 9.5px;
             color: #94a3b8;
         }
@@ -480,10 +763,148 @@ fn load_dynamic_island_css() {
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_USER,
         );
+        let polish = CssProvider::new();
+        polish.load_from_data(ISLAND_POLISH_CSS);
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &polish,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER + 2,
+        );
     }
 }
 
-fn set_active_segment(buttons: &[Button], active_idx: usize) {
+/// Finish layer over the base theme: lighter Inter weights, motion, soft
+/// top-lit surfaces. No outer shadows: they would widen the island's input
+/// area and block clicks on whatever is behind it.
+const ISLAND_POLISH_CSS: &str = r#"
+button {
+    font-weight: 560;
+    letter-spacing: -0.1px;
+    transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+}
+button image { opacity: 0.92; }
+button.seg-btn image, button.toggle-chip image { opacity: 0.85; }
+button.seg-btn:hover image { opacity: 1; }
+
+.island-shell, .island-shell-rec {
+    background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 46px);
+    border-color: rgba(255, 255, 255, 0.11);
+}
+.island-shell-rec { border-color: rgba(244, 63, 94, 0.6); }
+.island-title { font-weight: 650; letter-spacing: -0.15px; }
+.island-timer-rec { font-weight: 650; letter-spacing: 0.2px; }
+.section-cap { font-size: 9px; font-weight: 650; letter-spacing: 0.9px; }
+.panel-hint { font-weight: 500; }
+
+.bento-card {
+    background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0) 60px);
+    border-color: rgba(255, 255, 255, 0.07);
+    border-radius: 13px;
+}
+.seg-track { border-radius: 10px; }
+button.seg-btn { font-weight: 560; border-radius: 8px; }
+button.seg-btn-active {
+    font-weight: 620;
+    background-image: linear-gradient(180deg, #6d70f5, #4f46e5);
+    border-color: rgba(199, 210, 254, 0.35);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+button.shutter-rec {
+    font-weight: 620;
+    background-image: linear-gradient(180deg, #f43f5e, #e11d48);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+button.shutter-rec:hover { background-image: linear-gradient(180deg, #fb5a76, #e8264f); }
+button.shutter-stop { font-weight: 620; padding: 4px 10px; }
+button.action-chip, button.toggle-chip, button.toggle-chip-on { font-weight: 580; }
+button.lens-pill, button.lens-pill-zoomed { font-weight: 600; }
+button.close-pill { padding: 4px 6px; }
+button.close-pill image { opacity: 0.6; }
+button.close-pill:hover image { opacity: 1; }
+.status-strip { font-weight: 500; }
+
+/* Legibility: larger type and brighter secondary text on the dark theme. */
+button { font-size: 12px; min-height: 26px; }
+button.seg-btn, button.seg-btn-active { font-size: 12px; min-height: 26px; padding: 3px 8px; }
+button.seg-btn { color: #c3c9d4; }
+button.seg-btn:hover { color: #ffffff; }
+button.action-chip, button.toggle-chip, button.toggle-chip-on { font-size: 12px; padding: 5px 10px; }
+button.toggle-chip { color: #c3c9d4; }
+button.action-chip { color: #dbe1ff; }
+button.lens-pill, button.lens-pill-zoomed { font-size: 11.5px; }
+.island-title, .island-timer-rec { font-size: 12.5px; }
+.section-cap { font-size: 10.5px; color: #aab3c0; }
+.panel-hint { font-size: 11.5px; color: #b8bfca; }
+.coord-badge { font-size: 11px; }
+.status-strip { font-size: 11.5px; color: #b8bfca; }
+.bento-card { padding: 11px 12px; }
+
+.theme-light button.seg-btn { color: #3f4b5c; }
+.theme-light button.toggle-chip { color: #475569; }
+.theme-light button.action-chip { color: #3730a3; }
+.theme-light .section-cap { color: #5b6677; }
+.theme-light .panel-hint, .theme-light .status-strip { color: #4b5563; }
+
+.theme-light.island-shell, .theme-light.island-shell-rec {
+    background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 46px);
+    border-color: rgba(15, 23, 42, 0.12);
+}
+.theme-light.island-shell-rec { border-color: rgba(225, 29, 72, 0.5); }
+.theme-light .bento-card {
+    background-image: none;
+    border-color: rgba(15, 23, 42, 0.08);
+}
+.theme-light button.seg-btn {
+    background-color: transparent;
+    border-color: transparent;
+}
+.theme-light button.seg-btn:hover { background-color: rgba(15, 23, 42, 0.06); }
+.theme-light button.seg-btn-active {
+    background-image: linear-gradient(180deg, #6366f1, #4f46e5);
+    border-color: rgba(67, 56, 202, 0.5);
+}
+"#;
+
+/// A symbolic icon from the bundled set (`assets/icons`), recolored by GTK
+/// to the widget's text color.
+pub(crate) fn icon(name: &str, size: i32) -> Image {
+    let image = Image::from_icon_name(&format!("hgsr-{name}-symbolic"));
+    image.set_pixel_size(size);
+    image
+}
+
+/// A button showing an icon followed by `label` (or just the icon).
+pub(crate) fn icon_button(name: &str, label: &str) -> Button {
+    let row = GtkBox::new(Orientation::Horizontal, 6);
+    row.set_halign(Align::Center);
+    row.append(&icon(name, 15));
+    if !label.is_empty() {
+        row.append(&Label::new(Some(label)));
+    }
+    let button = Button::new();
+    button.set_child(Some(&row));
+    button
+}
+
+/// Sets a button's text, keeping the icon of an `icon_button`.
+pub(crate) fn set_btn_text(button: &Button, text: &str) {
+    let label = button.child().and_then(|row| {
+        let mut child = row.first_child();
+        while let Some(widget) = child {
+            if let Ok(label) = widget.clone().downcast::<Label>() {
+                return Some(label);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    });
+    match label {
+        Some(label) => label.set_text(text),
+        None => button.set_label(text),
+    }
+}
+
+pub(crate) fn set_active_segment(buttons: &[Button], active_idx: usize) {
     for (idx, btn) in buttons.iter().enumerate() {
         if idx == active_idx {
             btn.remove_css_class("seg-btn");
@@ -495,7 +916,7 @@ fn set_active_segment(buttons: &[Button], active_idx: usize) {
     }
 }
 
-fn draw_rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+pub(crate) fn draw_rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let r = r.min(w * 0.5).min(h * 0.5);
     cr.new_sub_path();
     cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
@@ -513,6 +934,9 @@ fn draw_rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, 
 
 fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     load_dynamic_island_css();
+    if let (Some(display), Some(dir)) = (gdk4::Display::default(), crate::bundled::symbolic_icon_dir()) {
+        gtk4::IconTheme::for_display(&display).add_search_path(dir);
+    }
 
     let is_light_mode = Arc::new(AtomicBool::new(false));
     if std::env::var("HYPERGSR_THEME").as_deref() == Ok("light") {
@@ -529,7 +953,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         .resizable(false)
         .build();
 
-    let _layer_ok = init_wayland_layer_shell(&window);
+    let layer_shell = init_wayland_layer_shell(&window);
+    if layer_shell.is_none() {
+        crate::x11_above::keep_above(&window);
+    }
 
     let shell_box = GtkBox::new(Orientation::Vertical, 0);
     shell_box.add_css_class("island-shell");
@@ -653,7 +1080,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     });
 
     // 6. Quit Button
-    let close_btn = Button::with_label("✕");
+    let close_btn = icon_button("close", "");
     close_btn.add_css_class("close-pill");
     close_btn.set_tooltip_text(Some("Quit HyperGSR"));
 
@@ -673,7 +1100,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     // =========================================================================
     let drawer_box = GtkBox::new(Orientation::Vertical, 7);
     drawer_box.add_css_class("island-drawer");
-    drawer_box.set_size_request(368, -1);
+    drawer_box.set_size_request(404, -1);
     drawer_box.set_visible(start_expanded);
 
     // -------------------------------------------------------------------------
@@ -699,7 +1126,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     vis_card.append(&vis_hdr);
 
     let radar_area = DrawingArea::new();
-    radar_area.set_content_width(346);
+    radar_area.set_content_width(382);
     radar_area.set_content_height(126);
 
     let zoom_history: std::rc::Rc<std::cell::RefCell<VecDeque<f32>>> =
@@ -869,16 +1296,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
     vis_card.append(&radar_area);
 
-    let footer_lbl = Label::new(Some("60 FPS Native GPU -> ~/Videos"));
+    let footer_lbl = Label::new(Some("Ready · recordings go to ~/Videos"));
     footer_lbl.set_hexpand(true);
     footer_lbl.set_halign(Align::Start);
 
     let vis_btn_row = GtkBox::new(Orientation::Horizontal, 6);
-    let test_zoom_btn = Button::with_label("🔒 Lock / Unlock Zoom");
+    let test_zoom_btn = icon_button("lock", "Lock zoom");
     test_zoom_btn.add_css_class("action-chip");
     test_zoom_btn.set_hexpand(true);
-    let pulse_zoom_btn = Button::with_label("⚡ 1.7s Pulse");
-    let reset_zoom_btn = Button::with_label("1.0× Wide");
+    let pulse_zoom_btn = icon_button("pulse", "Pulse");
+    let reset_zoom_btn = icon_button("wide", "1.0×");
     {
         let st = state.clone();
         let f_lbl = footer_lbl.clone();
@@ -892,11 +1319,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.tick();
             drop(g);
             if locked {
-                btn.set_label("🔓 Unlock Zoom");
-                f_lbl.set_text(&format!("🔒 Manual Zoom Locked at {target_z:.1}×"));
+                set_btn_text(&btn, "Unlock zoom");
+                f_lbl.set_text(&format!("Manual Zoom Locked at {target_z:.1}×"));
             } else {
-                btn.set_label("🔒 Lock / Unlock Zoom");
-                f_lbl.set_text("🔓 Manual Zoom Unlocked (1.0× Wide)");
+                set_btn_text(&btn, "Lock zoom");
+                f_lbl.set_text("Manual Zoom Unlocked (1.0× Wide)");
             }
             r_area.queue_draw();
         });
@@ -918,8 +1345,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 .trigger_manual_zoom(cx, cy, target_z, now, 1650);
             g.tick();
             drop(g);
-            lock_b.set_label("🔒 Lock / Unlock Zoom");
-            f_lbl.set_text(&format!("⚡ Triggered 1.7s Auto-Zoom Pulse ({target_z:.1}×)"));
+            set_btn_text(&lock_b, "Lock zoom");
+            f_lbl.set_text(&format!("Triggered 1.7s Auto-Zoom Pulse ({target_z:.1}×)"));
             r_area.queue_draw();
         });
     }
@@ -937,11 +1364,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.tick();
             drop(g);
             if locked {
-                lock_b.set_label("🔓 Unlock Zoom");
-                f_lbl.set_text(&format!("🔒 Manual Zoom Locked at {target_z:.1}×"));
+                set_btn_text(&lock_b, "Unlock zoom");
+                f_lbl.set_text(&format!("Manual Zoom Locked at {target_z:.1}×"));
             } else {
-                lock_b.set_label("🔒 Lock / Unlock Zoom");
-                f_lbl.set_text("🔓 Manual Zoom Unlocked (1.0× Wide)");
+                set_btn_text(&lock_b, "Lock zoom");
+                f_lbl.set_text("Manual Zoom Unlocked (1.0× Wide)");
             }
             r_area.queue_draw();
         });
@@ -959,7 +1386,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.zoom_engine.release_manual_lock();
             g.tick();
             drop(g);
-            lock_b.set_label("🔒 Lock / Unlock Zoom");
+            set_btn_text(&lock_b, "Lock zoom");
             f_lbl.set_text("↺ Reset Camera to 1.0× Wide");
             r_area.queue_draw();
         });
@@ -979,7 +1406,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let new_z = g.zoom_engine.adjust_manual_zoom_wheel(cx, cy, step);
             g.tick();
             drop(g);
-            f_lbl.set_text(&format!("🖱️ Wheel Zoom -> {new_z:.1}×"));
+            f_lbl.set_text(&format!("Wheel Zoom -> {new_z:.1}×"));
             r_area.queue_draw();
             glib::Propagation::Stop
         });
@@ -995,7 +1422,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.zoom_engine.release_manual_lock();
             g.tick();
             drop(g);
-            lock_b.set_label("🔒 Lock / Unlock Zoom");
+            set_btn_text(&lock_b, "Lock zoom");
             f_lbl.set_text("↺ Reset Camera to 1.0× Wide");
             r_area.queue_draw();
         });
@@ -1005,7 +1432,75 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     vis_btn_row.append(&reset_zoom_btn);
     vis_card.append(&vis_btn_row);
 
-    drawer_box.append(&vis_card);
+    // The drawer is split into tabs so each page fits on screen; the page
+    // area still scrolls on screens too short for the tallest one.
+    let drawer_stack = gtk4::Stack::builder()
+        .vhomogeneous(false)
+        .transition_type(gtk4::StackTransitionType::Crossfade)
+        .transition_duration(120)
+        .build();
+    let drawer_scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .vscrollbar_policy(gtk4::PolicyType::Automatic)
+        .child(&drawer_stack)
+        .build();
+    // Sizes the page area to the visible page, capped to the screen. GTK's
+    // natural-height propagation does not work inside a layer surface, so
+    // the height is set explicitly.
+    let fit_drawer: Rc<dyn Fn()> = {
+        let stack = drawer_stack.clone();
+        let scroll = drawer_scroll.clone();
+        let win = window.clone();
+        Rc::new(move || {
+            // Measure the page being shown, not the stack: mid-transition the
+            // stack still reports the previous page's size.
+            let Some(page) = stack.visible_child() else { return };
+            let width = if stack.width() > 0 { stack.width() } else { -1 };
+            let (_, natural, _, _) = page.measure(Orientation::Vertical, width);
+            // Room for the top bar, the tabs, the footer, and the island margins.
+            let available = screen_height(&win) - 170;
+            let height = natural.min(available).max(120);
+            // GTK refuses a minimum above the current maximum (and the
+            // reverse), so widen the range before narrowing it to `height`.
+            scroll.set_min_content_height(-1);
+            scroll.set_max_content_height(height);
+            scroll.set_min_content_height(height);
+            // Let the surface shrink when a shorter page is shown.
+            win.set_default_size(1, 1);
+        })
+    };
+    let tab_track = GtkBox::new(Orientation::Horizontal, 3);
+    tab_track.add_css_class("seg-track");
+    let tabs: Vec<(Button, &str)> = [("record", "Record", "record"), ("camera", "Camera & Zoom", "camera")]
+        .into_iter()
+        .map(|(icon_name, label, name)| {
+            let b = icon_button(icon_name, label);
+            b.set_hexpand(true);
+            tab_track.append(&b);
+            (b, name)
+        })
+        .collect();
+    let tab_btns: Vec<Button> = tabs.iter().map(|(b, _)| b.clone()).collect();
+    set_active_segment(&tab_btns, 0);
+    for (idx, (btn, name)) in tabs.iter().enumerate() {
+        let stack = drawer_stack.clone();
+        let all = tab_btns.clone();
+        let fit = fit_drawer.clone();
+        let name = name.to_string();
+        btn.connect_clicked(move |_| {
+            stack.set_visible_child_name(&name);
+            set_active_segment(&all, idx);
+            fit();
+        });
+    }
+    drawer_box.append(&tab_track);
+    drawer_box.append(&drawer_scroll);
+
+    drawer_stack.add_named(&crate::studio_panel::build(&state, &footer_lbl), Some("record"));
+    // The live camera sits with the zoom and theme controls it previews.
+    let camera_page = GtkBox::new(Orientation::Vertical, 7);
+    camera_page.append(&vis_card);
+    drawer_stack.add_named(&camera_page, Some("camera"));
 
     // -------------------------------------------------------------------------
     // CARD 2: Compact Segmented Controls (Theme, Camera Mode, Depth, Spring)
@@ -1021,8 +1516,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
     let app_track = GtkBox::new(Orientation::Horizontal, 3);
     app_track.add_css_class("seg-track");
-    let t_dark = Button::with_label("🌙 Obsidian Dark");
-    let t_light = Button::with_label("☀️ Pearl Light");
+    let t_dark = icon_button("moon", "Obsidian");
+    let t_light = icon_button("sun", "Pearl");
     t_dark.set_hexpand(true);
     t_light.set_hexpand(true);
     let theme_seg_btns = vec![t_dark.clone(), t_light.clone()];
@@ -1093,10 +1588,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
     let combo_track = GtkBox::new(Orientation::Horizontal, 3);
     combo_track.add_css_class("seg-track");
-    let c_shake_mid = Button::with_label("⇄ Shake/Mid");
-    let c_mid = Button::with_label("🖱️ Mid-Click");
-    let c_ctrl = Button::with_label("⌃ Ctrl+Click");
-    let c_dbl = Button::with_label("🖱️ Dbl-Click");
+    let c_shake_mid = icon_button("shake", "Shake");
+    let c_mid = icon_button("mouse", "Middle");
+    let c_ctrl = icon_button("ctrl-click", "Ctrl+Click");
+    let c_dbl = icon_button("double-click", "Double");
     for b in [&c_shake_mid, &c_mid, &c_ctrl, &c_dbl] {
         b.set_hexpand(true);
     }
@@ -1108,13 +1603,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     ];
     set_active_segment(&combo_preset_btns, 0);
 
-    let record_combo_btn = Button::with_label("🎯 Record Combo…");
+    let record_combo_btn = icon_button("keyboard", "Record combo…");
     record_combo_btn.set_hexpand(true);
     record_combo_btn.set_tooltip_text(Some(
         "Click, then perform ANY mouse click (Middle/Right/Side/Ctrl+Click), key press, or cursor shake to bind!",
     ));
 
-    let combo_action_btn = Button::with_label("⇄ Toggle Lock");
+    let combo_action_btn = icon_button("toggle", "Toggle lock");
     combo_action_btn.set_tooltip_text(Some(
         "Switch how your combo behaves: Toggle Lock (stay zoomed as long as you want), Hold to Zoom, or Step 1.8×/2.5×",
     ));
@@ -1140,7 +1635,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let short = binding.short_label();
             st.lock().zoom_cfg.combo_binding = binding.clone();
             set_active_segment(&btns, idx);
-            rec_b.set_label("🎯 Record Combo…");
+            set_btn_text(&rec_b, "Record combo…");
             rec_b.remove_css_class("action-chip");
             f_lbl.set_text(&format!("✓ Zoom Combo: {short}"));
         });
@@ -1154,12 +1649,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let now_learning = !learn_flag.load(Ordering::Relaxed);
             learn_flag.store(now_learning, Ordering::Relaxed);
             if now_learning {
-                btn.set_label("● Press Key, Click, or Shake…");
+                set_btn_text(&btn, "● Press Key, Click, or Shake…");
                 btn.add_css_class("action-chip");
-                f_lbl.set_text("🎯 Listening: Press any key/combo, Mid/Right-click, or Shake cursor!");
+                f_lbl.set_text("Listening: Press any key/combo, Mid/Right-click, or Shake cursor!");
             } else {
                 let lbl = st.lock().zoom_cfg.combo_binding.short_label();
-                btn.set_label(&lbl);
+                set_btn_text(&btn, &lbl);
                 f_lbl.set_text(&format!("✓ Zoom Combo: {lbl}"));
             }
         });
@@ -1195,9 +1690,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     g.tick();
                     drop(g);
                     f_lbl.set_text(if locked {
-                        "🔒 Manual Zoom Locked"
+                        "Manual Zoom Locked"
                     } else {
-                        "🔓 Manual Zoom Unlocked"
+                        "Manual Zoom Unlocked"
                     });
                     r_area.queue_draw();
                 }
@@ -1234,9 +1729,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 }
                 parts.push(match mapped_btn {
                     1 => "Click",
-                    2 => "🖱️ Mid-Click",
-                    3 => "🖱️ Right-Click",
-                    _ => "🖱️ Side-Btn",
+                    2 => "Middle-click",
+                    3 => "Right-click",
+                    _ => "Side button",
                 });
                 let label = parts.join(" + ");
                 ZoomComboBinding::Custom {
@@ -1258,7 +1753,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 b.remove_css_class("seg-btn-active");
                 b.add_css_class("seg-btn");
             }
-            rec_b.set_label(&lbl);
+            set_btn_text(&rec_b, &lbl);
             rec_b.add_css_class("action-chip");
             f_lbl.set_text(&format!("✓ Registered Custom Combo: {lbl}"));
         });
@@ -1320,7 +1815,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     key_name.to_uppercase()
                 };
                 parts.push(short_key);
-                let label = format!("⌨️ {}", parts.join("+"));
+                let label = format!("{}", parts.join("+"));
                 let new_binding = ZoomComboBinding::Custom {
                     ctrl,
                     alt,
@@ -1338,7 +1833,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     b.remove_css_class("seg-btn-active");
                     b.add_css_class("seg-btn");
                 }
-                rec_b.set_label(&disp);
+                set_btn_text(&rec_b, &disp);
                 rec_b.add_css_class("action-chip");
                 f_lbl.set_text(&format!("✓ Registered Key Combo: {disp}"));
                 return glib::Propagation::Stop;
@@ -1364,9 +1859,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     g.tick();
                     drop(g);
                     f_lbl.set_text(if locked {
-                        "🔒 Key Combo -> Zoom Locked"
+                        "Key Combo -> Zoom Locked"
                     } else {
-                        "🔓 Key Combo -> Zoom Unlocked"
+                        "Key Combo -> Zoom Unlocked"
                     });
                     r_area.queue_draw();
                     return glib::Propagation::Stop;
@@ -1389,7 +1884,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             };
             let lbl = g.zoom_cfg.combo_action.label();
             drop(g);
-            btn.set_label(lbl);
+            set_btn_text(&btn, lbl);
             f_lbl.set_text(&format!("✓ Combo Behavior: {lbl}"));
         });
     }
@@ -1540,12 +2035,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
     // Toggle Chips
     let tog_row1 = GtkBox::new(Orientation::Horizontal, 6);
-    let chip_bake = Button::with_label("● Auto-Zoom MP4: ON");
-    chip_bake.add_css_class("toggle-chip-on");
+    let bake_on = state.lock().auto_apply_zoom_on_stop;
+    let chip_bake = Button::with_label(if bake_on {
+        "● Auto-Zoom MP4: ON"
+    } else {
+        "○ Auto-Zoom MP4: OFF"
+    });
+    chip_bake.add_css_class(if bake_on { "toggle-chip-on" } else { "toggle-chip" });
     chip_bake.set_hexpand(true);
-    let chip_audio = Button::with_label("● System Audio: ON");
-    chip_audio.add_css_class("toggle-chip-on");
-    chip_audio.set_hexpand(true);
 
     {
         let st = state.clone();
@@ -1555,54 +2052,34 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.auto_apply_zoom_on_stop = !g.auto_apply_zoom_on_stop;
             let on = g.auto_apply_zoom_on_stop;
             g.zoom_cfg.enabled = on;
+            g.settings.auto_zoom = on;
+            g.settings.save();
             drop(g);
             if on {
-                btn.set_label("● Auto-Zoom MP4: ON");
+                set_btn_text(&btn, "● Auto-Zoom MP4: ON");
                 btn.remove_css_class("toggle-chip");
                 btn.add_css_class("toggle-chip-on");
                 f_lbl.set_text("✓ Auto-Zoom MP4 Post-Pass: ON");
             } else {
-                btn.set_label("○ Auto-Zoom MP4: OFF");
+                set_btn_text(&btn, "○ Auto-Zoom MP4: OFF");
                 btn.remove_css_class("toggle-chip-on");
                 btn.add_css_class("toggle-chip");
                 f_lbl.set_text("○ Auto-Zoom MP4 Post-Pass: OFF (Raw MP4)");
             }
         });
     }
-    {
-        let st = state.clone();
-        let f_lbl = footer_lbl.clone();
-        chip_audio.connect_clicked(move |btn| {
-            let mut g = st.lock();
-            g.record_audio = !g.record_audio;
-            let on = g.record_audio;
-            drop(g);
-            if on {
-                btn.set_label("● System Audio: ON");
-                btn.remove_css_class("toggle-chip");
-                btn.add_css_class("toggle-chip-on");
-                f_lbl.set_text("✓ System Desktop Audio: ON");
-            } else {
-                btn.set_label("○ System Audio: OFF");
-                btn.remove_css_class("toggle-chip-on");
-                btn.add_css_class("toggle-chip");
-                f_lbl.set_text("○ System Desktop Audio: OFF");
-            }
-        });
-    }
     tog_row1.append(&chip_bake);
-    tog_row1.append(&chip_audio);
     ctrl_card.append(&tog_row1);
 
-    drawer_box.append(&ctrl_card);
+    camera_page.append(&ctrl_card);
 
     // Bottom Status & Quick Open Bar
     let footer_row = GtkBox::new(Orientation::Horizontal, 6);
     footer_row.add_css_class("status-strip");
 
-    let play_last_btn = Button::with_label("▶ Play Latest");
+    let play_last_btn = icon_button("play", "Play latest");
     play_last_btn.add_css_class("action-chip");
-    let open_videos_btn = Button::with_label("📂 Videos");
+    let open_videos_btn = icon_button("folder", "Videos");
 
     footer_row.append(&footer_lbl);
     footer_row.append(&play_last_btn);
@@ -1610,7 +2087,15 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     drawer_box.append(&footer_row);
 
     shell_box.append(&drawer_box);
+    {
+        let fit = fit_drawer.clone();
+        window.connect_map(move |_| {
+            let fit = fit.clone();
+            glib::idle_add_local_once(move || fit());
+        });
+    }
     window.set_child(Some(&shell_box));
+    let keep_island_on_screen = install_island_drag(&window, &brand_box, layer_shell);
 
     // =========================================================================
     // MORPHING & NON-BLOCKING RECORDING HANDLERS
@@ -1618,15 +2103,22 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     {
         let drw = drawer_box.clone();
         let win = window.clone();
+        let keep_on_screen = keep_island_on_screen.clone();
+        let fit = fit_drawer.clone();
         expand_btn.connect_clicked(move |btn| {
             let expand = !drw.is_visible();
             drw.set_visible(expand);
             if expand {
-                btn.set_label("Studio ▴");
+                fit();
+            }
+            let keep_on_screen = keep_on_screen.clone();
+            glib::timeout_add_local_once(Duration::from_millis(80), move || keep_on_screen());
+            if expand {
+                set_btn_text(&btn, "Studio ▴");
                 btn.remove_css_class("studio-pill");
                 btn.add_css_class("studio-pill-open");
             } else {
-                btn.set_label("Studio ▾");
+                set_btn_text(&btn, "Studio ▾");
                 btn.remove_css_class("studio-pill-open");
                 btn.add_css_class("studio-pill");
                 win.set_default_size(1, 1);
@@ -1635,74 +2127,143 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
 
     let bg_zoom_busy = Arc::new(AtomicBool::new(false));
-    {
-        let st = state.clone();
-        let s_lbl = status_lbl.clone();
+    let render_progress = Arc::new(AtomicU32::new(0));
+    let save_result: Arc<parking_lot::Mutex<Option<Result<PathBuf, String>>>> =
+        Arc::new(parking_lot::Mutex::new(None));
+
+    // Switches the island between its idle and recording looks.
+    // While recording the island shrinks to a small pill (status, zoom, Stop)
+    // so it covers as little of the screen as possible; drag it by the left end.
+    let show_recording: Rc<dyn Fn(bool)> = {
         let r_icon = rec_icon.clone();
         let r_lbl = rec_btn_lbl.clone();
         let r_btn = rec_btn.clone();
         let shell = shell_box.clone();
-        let footer = footer_lbl.clone();
+        let s_lbl = status_lbl.clone();
+        let extras = [theme_btn.clone(), expand_btn.clone(), close_btn.clone()];
         let drw = drawer_box.clone();
-        let exp_b = expand_btn.clone();
         let win = window.clone();
-        let busy_flag = bg_zoom_busy.clone();
-
-        rec_btn.connect_clicked(move |_| {
-            if busy_flag.load(Ordering::Relaxed) {
-                return;
+        let keep_on_screen = keep_island_on_screen.clone();
+        Rc::new(move |recording: bool| {
+            for b in &extras {
+                b.set_visible(!recording);
             }
-            let is_currently_rec = st.lock().encoder_session.is_some();
-            if is_currently_rec {
-                if let Ok(Some((raw_path, zoom_events, do_zoom))) = st.lock().stop_recording_fast()
-                {
-                    r_icon.set_from_file(Some(asset_path("icon-record.svg")));
-                    r_lbl.set_text("Record");
-                    r_btn.remove_css_class("shutter-stop");
-                    r_btn.add_css_class("shutter-rec");
-                    shell.remove_css_class("island-shell-rec");
-                    shell.add_css_class("island-shell");
-                    s_lbl.remove_css_class("island-timer-rec");
-                    s_lbl.add_css_class("island-title");
-
-                    if do_zoom && !zoom_events.is_empty() {
-                        s_lbl.set_text("Zooming…");
-                        footer.set_text("⚡ Baking 60fps Sub-Pixel Auto-Zoom...");
-                        busy_flag.store(true, Ordering::Relaxed);
-                        let st_bg = st.clone();
-                        let busy_bg = busy_flag.clone();
-                        std::thread::spawn(move || {
-                            let final_p = apply_hardware_autozoom_pass(&raw_path, &zoom_events)
-                                .unwrap_or(raw_path);
-                            st_bg.lock().last_saved_file = Some(final_p.display().to_string());
-                            busy_bg.store(false, Ordering::Relaxed);
-                        });
-                    } else {
-                        s_lbl.set_text("Saved ✓");
-                        footer.set_text("✔ Saved to ~/Videos");
-                    }
-                }
-            } else if let Ok(_path) = st.lock().start_recording() {
-                // Automatically collapse Studio popover into compact Dynamic Island on Record
-                if drw.is_visible() {
-                    drw.set_visible(false);
-                    exp_b.set_label("Studio ▾");
-                    exp_b.remove_css_class("studio-pill-open");
-                    exp_b.add_css_class("studio-pill");
-                    win.set_default_size(1, 1);
-                }
+            if recording && drw.is_visible() {
+                drw.set_visible(false);
+                set_btn_text(&extras[1], "Studio ▾");
+                extras[1].remove_css_class("studio-pill-open");
+                extras[1].add_css_class("studio-pill");
+            }
+            r_lbl.set_visible(!recording);
+            win.set_default_size(1, 1);
+            let keep_on_screen = keep_on_screen.clone();
+            glib::timeout_add_local_once(Duration::from_millis(80), move || keep_on_screen());
+            if recording {
                 r_icon.set_from_file(Some(asset_path("icon-stop.svg")));
                 r_lbl.set_text("Stop");
+                r_btn.set_tooltip_text(Some("Stop recording"));
                 r_btn.remove_css_class("shutter-rec");
                 r_btn.add_css_class("shutter-stop");
-                s_lbl.set_text("● 00:00.0");
                 s_lbl.remove_css_class("island-title");
                 s_lbl.add_css_class("island-timer-rec");
                 shell.remove_css_class("island-shell");
                 shell.add_css_class("island-shell-rec");
-                footer.set_text("● Recording 1080p60 + Auto-Zoom...");
+            } else {
+                r_icon.set_from_file(Some(asset_path("icon-record.svg")));
+                r_lbl.set_text("Record");
+                r_btn.set_tooltip_text(Some("Start recording"));
+                r_btn.remove_css_class("shutter-stop");
+                r_btn.add_css_class("shutter-rec");
+                shell.remove_css_class("island-shell-rec");
+                shell.add_css_class("island-shell");
+                s_lbl.remove_css_class("island-timer-rec");
+                s_lbl.add_css_class("island-title");
+            }
+        })
+    };
+
+    // Stops the capture and finalizes, zooms, and frames it on a worker
+    // thread; the 16 ms tick reports the result. `failure` is set when the
+    // capture died on its own.
+    let stop_and_save: Rc<dyn Fn(Option<String>)> = {
+        let st = state.clone();
+        let s_lbl = status_lbl.clone();
+        let footer = footer_lbl.clone();
+        let busy_flag = bg_zoom_busy.clone();
+        let progress = render_progress.clone();
+        let slot = save_result.clone();
+        let show_recording = show_recording.clone();
+        Rc::new(move |failure: Option<String>| {
+            let Some(job) = st.lock().take_recording() else {
+                return;
+            };
+            show_recording(false);
+            s_lbl.set_text("Saving…");
+            footer.set_text(&match &failure {
+                Some(reason) => format!("Capture stopped: {reason}"),
+                None => "Finalizing the recording…".to_string(),
+            });
+            busy_flag.store(true, Ordering::Relaxed);
+            progress.store(0, Ordering::Relaxed);
+            let busy_bg = busy_flag.clone();
+            let progress = progress.clone();
+            let slot = slot.clone();
+            std::thread::spawn(move || {
+                // Whatever happens in the render, the island must leave "Saving…".
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    job.complete(&progress)
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("the recorder hit an internal error while saving")))
+                .map_err(|e| format!("{e:#}"));
+                *slot.lock() = Some(result);
+                busy_bg.store(false, Ordering::Relaxed);
+            });
+        })
+    };
+
+    {
+        let st = state.clone();
+        let s_lbl = status_lbl.clone();
+        let footer = footer_lbl.clone();
+        let busy_flag = bg_zoom_busy.clone();
+        let show_recording = show_recording.clone();
+        let stop_and_save = stop_and_save.clone();
+
+        rec_btn.connect_clicked(move |_| {
+            if busy_flag.load(Ordering::Relaxed) {
+                footer.set_text("Still saving the last recording…");
+                return;
+            }
+            if st.lock().encoder_session.is_some() {
+                stop_and_save(None);
+                return;
+            }
+            let started = st.lock().start_recording();
+            match started {
+                Ok(_) => {
+                    // The bar stays where it is, above every window, while recording.
+                    show_recording(true);
+                    s_lbl.set_text("Starting…");
+                    footer.set_text("● Waiting for the screen share to start…");
+                }
+                Err(err) => {
+                    s_lbl.set_text("HyperGSR");
+                    footer.set_text(&format!("{err:#}"));
+                }
             }
         });
+    }
+
+    // `hypergsr --toggle-recording` (the desktop shortcut) lands here.
+    {
+        let action = gio::SimpleAction::new("toggle-record", None);
+        let rec = rec_btn.clone();
+        action.connect_activate(move |_, _| rec.emit_clicked());
+        app.add_action(&action);
+    }
+    if std::env::var("HYPERGSR_START_RECORDING").as_deref() == Ok("1") {
+        let rec = rec_btn.clone();
+        glib::timeout_add_local_once(Duration::from_millis(700), move || rec.emit_clicked());
     }
 
     {
@@ -1730,9 +2291,56 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     {
         let st = state.clone();
         let win = window.clone();
+        let busy_flag = bg_zoom_busy.clone();
         close_btn.connect_clicked(move |_| {
-            let _ = st.lock().stop_recording_fast();
-            win.close();
+            // Save a running recording, and let a render in progress finish,
+            // before quitting; the island hides at once.
+            let job = st.lock().take_recording();
+            if job.is_none() && !busy_flag.load(Ordering::Relaxed) {
+                win.close();
+                return;
+            }
+            win.set_visible(false);
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            if let Some(job) = job {
+                std::thread::spawn(move || {
+                    let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        job.complete(&AtomicU32::new(0))
+                    }));
+                    if !matches!(saved, Ok(Ok(_))) {
+                        eprintln!("[HyperGSR] Could not save the recording");
+                    }
+                    let _ = tx.send(());
+                });
+            } else {
+                drop(tx);
+            }
+            let win = win.clone();
+            let busy_flag = busy_flag.clone();
+            let mut saved = false;
+            glib::timeout_add_local(Duration::from_millis(100), move || {
+                saved = saved || !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+                if !saved || busy_flag.load(Ordering::Relaxed) {
+                    return ControlFlow::Continue;
+                }
+                win.close();
+                ControlFlow::Break
+            });
+        });
+    }
+
+    // Closing the window any other way (Alt+F4, the compositor) saves first too.
+    {
+        let st = state.clone();
+        let busy_flag = bg_zoom_busy.clone();
+        let close_btn = close_btn.clone();
+        window.connect_close_request(move |_| {
+            let pending = st.lock().encoder_session.is_some() || busy_flag.load(Ordering::Relaxed);
+            if pending {
+                close_btn.emit_clicked();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
         });
     }
 
@@ -1749,6 +2357,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let wave = wave_indicator.clone();
         let z_hist = zoom_history.clone();
         let busy_flag = bg_zoom_busy.clone();
+        let progress = render_progress.clone();
+        let slot = save_result.clone();
+        let stop_and_save = stop_and_save.clone();
         let learn_flag = learning_combo.clone();
         let rec_combo_b = record_combo_btn.clone();
         let preset_btns = combo_preset_btns.clone();
@@ -1756,14 +2367,25 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let mut last_c_str = String::new();
         let mut last_s_str = String::new();
         let mut was_zoomed = false;
-        let mut was_busy = false;
         let mut ui_div = 0u32;
+        let mut idle_div = 0u32;
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
+            // Idle and collapsed, nothing on screen needs 60 Hz: poll at ~15 Hz
+            // to keep the recorder's background cost negligible.
+            idle_div = idle_div.wrapping_add(1);
+            let hot = drw.is_visible()
+                || learn_flag.load(Ordering::Relaxed)
+                || busy_flag.load(Ordering::Relaxed);
             let Some(mut g) = st.try_lock() else {
                 return ControlFlow::Continue;
             };
+            if !hot && g.encoder_session.is_none() && idle_div % 4 != 0 {
+                return ControlFlow::Continue;
+            }
             g.tick();
+            let failure = g.poll_capture_failure();
+            let capture_live = g.recording_start.is_some();
             let vp = g.last_viewport;
             let cur = g.last_cursor;
             let target_z = g.zoom_cfg.target_zoom;
@@ -1771,7 +2393,6 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let is_combo_only = matches!(g.zoom_cfg.mode, AutoZoomMode::Manual);
             let is_rec = g.encoder_session.is_some();
             let elapsed = g.recording_elapsed_sec();
-            let last_saved = g.last_saved_file.clone();
 
             // Check if user is in "Record Combo…" self-registration mode and performed a global gesture/button/key
             let mut learned_label: Option<String> = None;
@@ -1835,7 +2456,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                         mouse_button: 0,
                         keycode: kc,
                         shake: false,
-                        label: format!("⌨️ {}", parts.join("+")),
+                        label: format!("{}", parts.join("+")),
                     })
                 } else {
                     None
@@ -1850,12 +2471,17 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             }
             drop(g);
 
+            if let Some(reason) = failure {
+                stop_and_save(Some(reason));
+                return ControlFlow::Continue;
+            }
+
             if let Some(lbl) = learned_label {
                 for b in &preset_btns {
                     b.remove_css_class("seg-btn-active");
                     b.add_css_class("seg-btn");
                 }
-                rec_combo_b.set_label(&lbl);
+                set_btn_text(&rec_combo_b, &lbl);
                 rec_combo_b.add_css_class("action-chip");
                 f_lbl.set_text(&format!("✓ Registered Global Gesture: {lbl}"));
             }
@@ -1867,17 +2493,43 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             }
 
             let is_busy = busy_flag.load(Ordering::Relaxed);
-            if was_busy && !is_busy {
-                s_lbl.set_text("HyperGSR");
-                if last_saved.is_some() {
-                    f_lbl.set_text("✔ Saved Smooth Auto-Zoom MP4 -> ~/Videos");
+            if is_busy {
+                let permille = progress.load(Ordering::Relaxed);
+                let new_s = if permille == 0 {
+                    "Saving…".to_string()
+                } else {
+                    format!("Rendering {}%", permille / 10)
+                };
+                if new_s != last_s_str {
+                    s_lbl.set_text(&new_s);
+                    last_s_str = new_s;
                 }
             }
-            was_busy = is_busy;
-
+            // Polled every tick: a save that fails instantly (a cancelled
+            // screen share) finishes before busy is ever seen as set.
+            let finished = if is_busy { None } else { slot.lock().take() };
+            if let Some(finished) = finished {
+                last_s_str.clear();
+                match Some(finished) {
+                    Some(Ok(path)) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        st.lock().last_saved_file = Some(path.display().to_string());
+                        s_lbl.set_text("Saved ✓");
+                        f_lbl.set_text(&format!("Saved {name}"));
+                    }
+                    Some(Err(err)) => {
+                        s_lbl.set_text("Not saved");
+                        f_lbl.set_text(&format!("{err}"));
+                    }
+                    None => s_lbl.set_text("HyperGSR"),
+                }
+            }
             let is_zoomed = vp.zoom > 1.06;
             let new_z = if manual_locked {
-                format!("🔒 {:.1}× Lock", vp.zoom.max(1.2))
+                format!("{:.1}× Locked", vp.zoom.max(1.2))
             } else if is_zoomed {
                 format!("{:.1}× Zoom", vp.zoom)
             } else if is_combo_only {
@@ -1900,7 +2552,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 was_zoomed = is_zoomed;
             }
 
-            if is_rec {
+            if is_rec && !capture_live {
+                if last_s_str != "Starting…" {
+                    s_lbl.set_text("Starting…");
+                    last_s_str = "Starting…".to_string();
+                }
+                wave.queue_draw();
+            } else if is_rec {
                 let mins = (elapsed as u64) / 60;
                 let secs = (elapsed as u64) % 60;
                 let tenths = ((elapsed * 10.0) as u64) % 10;
@@ -1936,9 +2594,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         });
     }
 
+    if let Ok(tab) = std::env::var("HYPERGSR_STUDIO_TAB") {
+        if let Some((btn, _)) = tabs.iter().find(|(_, name)| *name == tab) {
+            btn.emit_clicked();
+        }
+    }
     if std::env::var("HYPERGSR_OPEN_STUDIO").as_deref() == Ok("1") {
         drawer_box.set_visible(true);
-        expand_btn.set_label("Studio ▴");
+        set_btn_text(&expand_btn, "Studio ▴");
         expand_btn.remove_css_class("studio-pill");
         expand_btn.add_css_class("studio-pill-open");
     }
@@ -1949,7 +2612,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     if let Ok(shot_path) = std::env::var("HYPERGSR_SCREENSHOT_PATH") {
         let win_shot = window.clone();
         let shell_shot = shell_box.clone();
-        glib::timeout_add_local_once(Duration::from_millis(650), move || {
+        let delay = std::env::var("HYPERGSR_SCREENSHOT_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(650);
+        glib::timeout_add_local_once(Duration::from_millis(delay), move || {
             let paintable = gtk4::WidgetPaintable::new(Some(&shell_shot));
             let w = shell_shot.width().max(1);
             let h = shell_shot.height().max(1);

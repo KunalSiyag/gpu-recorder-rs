@@ -2,11 +2,15 @@ use crate::capture::{CaptureSourceMode, FrameBuffer, ScreenCapturer};
 use crate::compositor::{FrameCompositor, FrameStyleConfig};
 use crate::cursor::{CursorConfig, CursorTracker};
 use crate::zoom_engine::{ZoomConfig, ZoomEngine};
-use anyhow::{Context, Result};
+use crate::settings::{AudioMode, CaptureSource, Quality, Region};
+use anyhow::{bail, Context, Result};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HardwareEncoderBackend {
@@ -71,13 +75,31 @@ pub struct RecordedZoomEvent {
     pub clicked: bool,
     #[serde(default)]
     pub manual_lock: bool,
+    /// The cursor was on a different display than the one being recorded.
+    #[serde(default)]
+    pub off_capture: bool,
+}
+
+/// Whether a cursor on a `cursor_output`-sized display can be on the captured
+/// monitor of `capture` pixels. Displays of equal size cannot be told apart
+/// and count as a match; a rotated display matches either orientation.
+pub fn cursor_on_capture(capture: (u32, u32), cursor_output: (f32, f32)) -> bool {
+    let (w, h) = (capture.0 as f32, capture.1 as f32);
+    let same = |a: f32, b: f32| (a - b).abs() <= 2.0;
+    (same(w, cursor_output.0) && same(h, cursor_output.1))
+        || (same(w, cursor_output.1) && same(h, cursor_output.0))
 }
 
 pub enum RecordingEngineKind {
-    /// Native PipeWire + XDG Desktop Portal + NVENC GPU capture (`hypergsr-pw-capture`)
+    /// PipeWire + XDG Desktop Portal capture helper (`hypergsr-pw-capture`)
+    /// feeding an FFmpeg hardware encoder.
     ZeroCopyGsr {
         child: Child,
         stdin: Option<ChildStdin>,
+        status: Arc<Mutex<CaptureStatus>>,
+        /// Parses the helper's stdout; joined once the helper exits so its
+        /// last ERROR line is never missed.
+        reader: Option<std::thread::JoinHandle<()>>,
     },
     /// Raw frame pipe to FFmpeg hardware encoder (for synthetic/studio showcase rendering)
     FfmpegPipe {
@@ -85,6 +107,40 @@ pub enum RecordingEngineKind {
         stdin: Option<ChildStdin>,
     },
 }
+
+/// What the capture helper has reported on stdout so far.
+#[derive(Debug, Default)]
+pub struct CaptureStatus {
+    /// When the first frame reached the encoder: time zero of the video.
+    pub ready_at: Option<Instant>,
+    pub size: Option<(u32, u32)>,
+    pub error: Option<String>,
+    /// FFmpeg's pid, which is also its process group.
+    pub encoder_pid: Option<i32>,
+}
+
+/// How a screen recording is captured.
+#[derive(Debug, Clone)]
+pub struct CaptureOptions {
+    pub fps: u32,
+    pub quality: Quality,
+    pub audio: AudioMode,
+    pub source: CaptureSource,
+    pub region: Option<Region>,
+    pub show_cursor: bool,
+    /// Ignore the remembered portal selection and show the picker again.
+    pub repick: bool,
+}
+
+/// Result of stopping a capture.
+pub struct FinishedCapture {
+    pub path: PathBuf,
+    pub zoom_events: Vec<RecordedZoomEvent>,
+    /// Set when the helper reported a failure or exited abnormally.
+    pub error: Option<String>,
+}
+
+const HELPER_PROTOCOL: &str = "3";
 
 pub struct ActiveEncoderSession {
     pub kind: RecordingEngineKind,
@@ -98,111 +154,192 @@ pub struct ActiveEncoderSession {
 }
 
 impl ActiveEncoderSession {
-    /// Starts a standalone native PipeWire + XDG Desktop Portal + NVENC GPU screen recording
-    /// session (`bin/hypergsr-pw-capture`). Reuses the persisted portal `restore_token` silently
-    /// with zero permission popups and zero Flatpak dependency.
-    pub fn start_zero_copy_gpu(
-        output_path: impl AsRef<Path>,
-        fps: u32,
-        record_audio: bool,
-    ) -> Result<Self> {
+    /// Starts a portal screen capture through `hypergsr-pw-capture`. The
+    /// remembered portal selection is reused, so the picker only appears the
+    /// first time (or when `options.repick` is set). Recording time zero is
+    /// the first captured frame; see [`Self::ready_at`].
+    pub fn start_capture(output_path: impl AsRef<Path>, options: &CaptureOptions) -> Result<Self> {
         let out_path = output_path.as_ref().to_path_buf();
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-
-        let helper_bin = Self::ensure_native_pw_capture_helper()?;
-        let token_file = Self::ensure_portal_restore_token_file()?;
+        let caps = crate::ffmpeg::capabilities();
+        if !caps.ffmpeg {
+            bail!("FFmpeg is not installed; install it from your distribution to record");
+        }
+        let audio = if caps.pulse { options.audio } else { AudioMode::Off };
+        let helper_bin = Self::find_capture_helper()?;
+        let token_file = Self::portal_restore_token_file(options.source)?;
 
         let mut cmd = Command::new(&helper_bin);
-        cmd.arg(&out_path)
+        cmd.arg("--token")
             .arg(&token_file)
-            .arg(fps.to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        if record_audio {
-            cmd.arg("audio");
+            .args(["--fps", &options.fps.to_string()])
+            .args([
+                "--sources",
+                if options.source == CaptureSource::Window { "window" } else { "monitor" },
+            ])
+            .args(["--cursor", if options.show_cursor { "embedded" } else { "hidden" }]);
+        if options.repick {
+            cmd.arg("--reset");
         }
+        cmd.arg("--").args(crate::ffmpeg::capture_output_args(
+            &caps.encoder,
+            options.quality,
+            options.fps,
+            audio,
+            options.region,
+            &out_path,
+        ));
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(capture_log());
 
         let mut child = cmd
             .spawn()
-            .context("Failed to spawn standalone hypergsr-pw-capture process")?;
+            .context("Failed to spawn the hypergsr-pw-capture helper")?;
         let stdin = child.stdin.take();
+        let status = Arc::new(Mutex::new(CaptureStatus::default()));
+        let reader = child.stdout.take().map(|stdout| {
+            let status = status.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    let mut st = status.lock();
+                    if let Some(rest) = line.strip_prefix("READY ") {
+                        let mut it = rest.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
+                        st.size = it.next().zip(it.next());
+                        st.ready_at.get_or_insert_with(Instant::now);
+                    } else if let Some(msg) = line.strip_prefix("ERROR ") {
+                        st.error.get_or_insert_with(|| msg.to_string());
+                    } else if let Some(pid) = line.strip_prefix("ENCODER ") {
+                        st.encoder_pid = pid.trim().parse().ok().filter(|&p: &i32| p > 0);
+                    }
+                }
+            })
+        });
 
         Ok(Self {
-            kind: RecordingEngineKind::ZeroCopyGsr { child, stdin },
+            kind: RecordingEngineKind::ZeroCopyGsr { child, stdin, status, reader },
             output_path: out_path,
             frames_written: 0,
-            active_backend: "Native PipeWire Portal + NVENC GPU".to_string(),
-            width: 1920,
-            height: 1080,
-            fps,
+            active_backend: format!("PipeWire Portal + {}", caps.encoder.label()),
+            width: 0,
+            height: 0,
+            fps: options.fps,
             zoom_events: Vec::with_capacity(4096),
         })
     }
 
-    fn ensure_portal_restore_token_file() -> Result<PathBuf> {
-        let home = crate::bundled::home_dir();
-        let config_dir = crate::bundled::config_dir();
-        std::fs::create_dir_all(&config_dir)?;
-        let hypergsr_token = config_dir.join("restore_token");
-        let legacy_token = home
-            .join(".var/app/com.dec05eba.gpu_screen_recorder/config/gpu-screen-recorder/restore_token");
-
-        if !hypergsr_token.exists() && legacy_token.exists() {
-            let _ = std::fs::copy(&legacy_token, &hypergsr_token);
-        }
-        if hypergsr_token.exists() {
-            Ok(hypergsr_token)
-        } else {
-            Ok(legacy_token)
+    /// When the first frame reached the encoder, once capture is running.
+    pub fn ready_at(&self) -> Option<Instant> {
+        match &self.kind {
+            RecordingEngineKind::ZeroCopyGsr { status, .. } => status.lock().ready_at,
+            RecordingEngineKind::FfmpegPipe { .. } => None,
         }
     }
 
-    fn ensure_native_pw_capture_helper() -> Result<PathBuf> {
+    /// `Some(reason)` once the capture process has exited on its own.
+    pub fn poll_failure(&mut self) -> Option<String> {
+        let RecordingEngineKind::ZeroCopyGsr { child, status, reader, .. } = &mut self.kind else {
+            return None;
+        };
+        let exit = child.try_wait().ok().flatten()?;
+        if let Some(reader) = reader.take() {
+            let _ = reader.join();
+        }
+        let st = status.lock();
+        Some(match (&st.error, st.ready_at) {
+            (Some(msg), _) => msg.clone(),
+            (None, None) if exit.success() => "screen sharing was cancelled".to_string(),
+            (None, _) => format!("the capture process stopped unexpectedly ({exit})"),
+        })
+    }
+
+    fn portal_restore_token_file(source: CaptureSource) -> Result<PathBuf> {
+        let config_dir = crate::bundled::config_dir();
+        std::fs::create_dir_all(&config_dir)?;
+        if source == CaptureSource::Window {
+            return Ok(config_dir.join("restore_token_window"));
+        }
+        let hypergsr_token = config_dir.join("restore_token");
+        let legacy_token = crate::bundled::home_dir()
+            .join(".var/app/com.dec05eba.gpu_screen_recorder/config/gpu-screen-recorder/restore_token");
+        if !hypergsr_token.exists() && legacy_token.exists() {
+            let _ = std::fs::copy(&legacy_token, &hypergsr_token);
+        }
+        Ok(hypergsr_token)
+    }
+
+    fn helper_speaks_protocol(path: &Path) -> bool {
+        let Ok(mut child) = Command::new(path)
+            .arg("--protocol")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                let mut out = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    let _ = stdout.read_to_string(&mut out);
+                }
+                return out.trim() == HELPER_PROTOCOL;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        false
+    }
+
+    /// Resolves the capture helper ahead of the first recording, so pressing
+    /// Record does not wait for the lookup.
+    pub fn warm_up() {
+        let _ = Self::find_capture_helper();
+    }
+
+    fn find_capture_helper() -> Result<PathBuf> {
+        // Only a hit is cached, so a slow first probe or a helper installed
+        // later does not disable recording until restart.
+        static HELPER: Mutex<Option<PathBuf>> = Mutex::new(None);
+        if let Some(found) = HELPER.lock().clone() {
+            return Ok(found);
+        }
+        let found = Self::search_capture_helper().ok();
+        *HELPER.lock() = found.clone();
+        found.context(
+                "No compatible hypergsr-pw-capture helper was found; reinstall HyperGSR \
+                 (building from source needs gcc, pkg-config, PipeWire, GLib and libportal)",
+            )
+    }
+
+    /// Finds a capture helper that matches this build. npm installs it beside
+    /// the recorder, system packages under lib/hypergsr, and every build
+    /// embeds one; stale copies from older releases are skipped.
+    fn search_capture_helper() -> Result<PathBuf> {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
-
-        // npm installs the helper beside the recorder, system packages under lib/hypergsr,
-        // and source builds use bin/.
-        let candidates = [
-            exe_dir.join("hypergsr-pw-capture"),
-            exe_dir.join("../lib/hypergsr/hypergsr-pw-capture"),
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("bin/hypergsr-pw-capture"),
-            exe_dir.join("../../bin/hypergsr-pw-capture"),
+        let installed = [
+            Some(exe_dir.join("hypergsr-pw-capture")),
+            Some(exe_dir.join("../lib/hypergsr/hypergsr-pw-capture")),
+            crate::bundled::pw_capture_helper(),
+            Some(exe_dir.join("../../bin/hypergsr-pw-capture")),
         ];
-        for cand in &candidates {
-            if cand.exists() {
-                return Ok(cand.clone());
-            }
-        }
-        if let Some(embedded) = crate::bundled::pw_capture_helper() {
-            return Ok(embedded);
-        }
-
-        let bin_dir = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("bin");
-        std::fs::create_dir_all(&bin_dir)?;
-        let out_bin = bin_dir.join("hypergsr-pw-capture");
-        let src_c = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("src/pw_portal_capture.c");
-        if src_c.exists() {
-            let build_cmd = format!(
-                "gcc -O3 \"{}\" -o \"{}\" $(pkg-config --cflags --libs libpipewire-0.3 libspa-0.2 gio-2.0) -l:libportal.so.1 -lpthread",
-                src_c.display(),
-                out_bin.display()
-            );
-            let _ = Command::new("sh").args(["-c", &build_cmd]).status();
-        }
-        Ok(out_bin)
+        installed
+            .into_iter()
+            .flatten()
+            .find(|cand| cand.exists() && Self::helper_speaks_protocol(cand))
+            .context(
+                "No compatible hypergsr-pw-capture helper was found; reinstall HyperGSR \
+                 (building from source needs gcc, pkg-config, PipeWire, GLib and libportal)",
+            )
     }
 
     pub fn start(
@@ -212,12 +349,6 @@ impl ActiveEncoderSession {
         fps: u32,
         preferred: HardwareEncoderBackend,
     ) -> Result<Self> {
-        if preferred == HardwareEncoderBackend::GsrZeroCopyGpu {
-            if let Ok(session) = Self::start_zero_copy_gpu(&output_path, fps, false) {
-                return Ok(session);
-            }
-        }
-
         let out_path = output_path.as_ref().to_path_buf();
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -333,15 +464,26 @@ impl ActiveEncoderSession {
         cursor_y: f32,
         clicked: bool,
         manual_lock: bool,
+        off_capture: bool,
     ) {
         self.frames_written += 1;
         let should_push = clicked
             || self
                 .zoom_events
                 .last()
-                .map(|last| last.manual_lock != manual_lock || (t_sec - last.timestamp_sec) >= 0.015)
+                .map(|last| {
+                    last.manual_lock != manual_lock
+                        || last.off_capture != off_capture
+                        || (t_sec - last.timestamp_sec) >= 0.015
+                })
                 .unwrap_or(true);
-        if should_push && self.zoom_events.len() < 36_000 {
+        // About 3 hours of telemetry at 60 Hz before samples are thinned out.
+        let thinned = self.zoom_events.len() >= 600_000
+            && self
+                .zoom_events
+                .last()
+                .is_some_and(|last| t_sec - last.timestamp_sec < 0.25);
+        if should_push && !thinned {
             self.zoom_events.push(RecordedZoomEvent {
                 timestamp_sec: t_sec,
                 center_x: cx,
@@ -351,7 +493,17 @@ impl ActiveEncoderSession {
                 cursor_y,
                 clicked,
                 manual_lock,
+                off_capture,
             });
+        }
+    }
+
+    /// Raw size of the captured stream (a whole monitor for screen and area
+    /// capture), once the first frame arrived.
+    pub fn capture_size(&self) -> Option<(u32, u32)> {
+        match &self.kind {
+            RecordingEngineKind::ZeroCopyGsr { status, .. } => status.lock().size,
+            RecordingEngineKind::FfmpegPipe { .. } => None,
         }
     }
 
@@ -381,16 +533,36 @@ impl ActiveEncoderSession {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<(PathBuf, Vec<RecordedZoomEvent>)> {
+    /// Stops the capture and waits for the file to be finalized. This can take
+    /// a few seconds, so call it off the UI thread.
+    pub fn finish_capture(mut self) -> FinishedCapture {
+        let mut error = None;
         match self.kind {
             RecordingEngineKind::ZeroCopyGsr {
                 ref mut child,
                 ref mut stdin,
+                ref status,
+                ref mut reader,
             } => {
+                // Closing stdin is the helper's stop signal.
                 drop(stdin.take());
-                let pid = child.id().to_string();
-                let _ = Command::new("kill").args(["-TERM", &pid]).status();
-                let _ = child.wait();
+                let exit = wait_with_escalation(child);
+                if let Some(reader) = reader.take() {
+                    let _ = reader.join();
+                }
+                // A helper that died or was killed leaves FFmpeg finishing the
+                // file on its own; wait for it so nobody reads a half-written file.
+                let helper_clean = exit.is_some_and(|e| e.success());
+                if let (false, Some(pid)) = (helper_clean, status.lock().encoder_pid) {
+                    reap_orphaned_encoder(pid);
+                }
+                let st = status.lock();
+                error = st.error.clone();
+                if error.is_none() && st.ready_at.is_none() {
+                    error = Some("no frames were captured".to_string());
+                } else if error.is_none() && !exit.is_some_and(|e| e.success()) {
+                    error = Some("the capture process did not exit cleanly".to_string());
+                }
             }
             RecordingEngineKind::FfmpegPipe {
                 ref mut child,
@@ -400,252 +572,75 @@ impl ActiveEncoderSession {
                 let _ = child.wait();
             }
         }
-        Ok((self.output_path, self.zoom_events))
+        FinishedCapture {
+            path: self.output_path,
+            zoom_events: self.zoom_events,
+            error,
+        }
+    }
+
+    pub fn finish(self) -> Result<(PathBuf, Vec<RecordedZoomEvent>)> {
+        let done = self.finish_capture();
+        Ok((done.path, done.zoom_events))
     }
 }
 
-/// Precomputed horizontal sub-pixel bilinear lookup entry for 1920-wide row resampling
-#[derive(Clone, Copy)]
-struct BilinearXSample {
-    off0: usize,
-    off1: usize,
-    w0: u32,
-    w1: u32,
+/// Waits for `child`, escalating from a polite wait to SIGTERM and SIGKILL.
+fn wait_with_escalation(child: &mut Child) -> Option<std::process::ExitStatus> {
+    let steps = [(0, 20_000u64), (libc::SIGTERM, 10_000), (libc::SIGKILL, 2_000)];
+    for (signal, wait_ms) in steps {
+        if signal != 0 {
+            unsafe {
+                libc::kill(child.id() as i32, signal);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => return None,
+            }
+        }
+    }
+    None
 }
 
-/// Applies a Screen Studio-grade, sub-pixel bilinear, 60.000 Hz spring-smoothed Auto-Zoom pass
-/// to a recorded zero-copy MP4 using hardware NVENC encoding.
-pub fn apply_hardware_autozoom_pass(
-    input_mp4: &Path,
-    events: &[RecordedZoomEvent],
-) -> Result<PathBuf> {
-    use std::io::Read;
-
-    if !input_mp4.exists() {
-        anyhow::bail!("Input recording does not exist: {}", input_mp4.display());
-    }
-    let stem = input_mp4
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("recording");
-    let zoomed_path = input_mp4.with_file_name(format!("{stem}_autozoom.mp4"));
-
-    // Save telemetry sidecar JSON
-    let json_path = input_mp4.with_file_name(format!("{stem}_telemetry.json"));
-    if let Ok(json_str) = serde_json::to_string_pretty(events) {
-        let _ = std::fs::write(&json_path, json_str);
-    }
-
-    let w: usize = 1920;
-    let h: usize = 1080;
-    let stride = w * 3;
-    let frame_bytes = stride * h;
-
-    // Precompute a C2-continuous 60.000 Hz trajectory over the entire recording duration
-    // so there are ZERO linear-interpolation corners and ZERO stuck-zoom segments.
-    let total_dur = events
-        .last()
-        .map(|e| e.timestamp_sec)
-        .unwrap_or(3.0)
-        .max(0.5);
-    let est_frames = ((total_dur * 60.0).ceil() as usize).max(60) + 120;
-    let smooth_frames = build_smooth_60fps_camera_frames(events, est_frames);
-
-    let mut dec = Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-i",
-            &input_mp4.display().to_string(),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            "1920x1080",
-            "-r",
-            "60",
-            "pipe:1",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Failed to spawn ffmpeg decoder for auto-zoom pass")?;
-
-    let mut enc = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-v",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            "1920x1080",
-            "-r",
-            "60",
-            "-i",
-            "pipe:0",
-            "-i",
-            &input_mp4.display().to_string(),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a?",
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p4",
-            "-b:v",
-            "16M",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "copy",
-            &zoomed_path.display().to_string(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Failed to spawn ffmpeg NVENC encoder for auto-zoom pass")?;
-
-    let mut dec_out = dec.stdout.take().context("Missing decoder stdout")?;
-    let mut enc_in = enc.stdin.take().context("Missing encoder stdin")?;
-
-    let mut in_buf = vec![0u8; frame_bytes];
-    let mut out_buf = vec![0u8; frame_bytes];
-    let mut x_table = vec![
-        BilinearXSample {
-            off0: 0,
-            off1: 0,
-            w0: 256,
-            w1: 0
-        };
-        w
-    ];
-    let mut frame_idx = 0usize;
-
-    loop {
-        let mut read_total = 0usize;
-        while read_total < frame_bytes {
-            match dec_out.read(&mut in_buf[read_total..]) {
-                Ok(0) => break,
-                Ok(n) => read_total += n,
-                Err(_) => break,
+/// Waits for an FFmpeg that outlived its helper, then stops its process group.
+fn reap_orphaned_encoder(pid: i32) {
+    let alive = || unsafe { libc::kill(pid, 0) == 0 };
+    for (signal, wait_ms) in [(0, 10_000u64), (libc::SIGINT, 5_000), (libc::SIGKILL, 1_000)] {
+        if !alive() {
+            return;
+        }
+        if signal != 0 {
+            unsafe {
+                libc::kill(-pid, signal);
             }
         }
-        if read_total < frame_bytes {
-            break;
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
         }
-
-        let (cx, cy, zoom) = smooth_frames
-            .get(frame_idx)
-            .copied()
-            .unwrap_or_else(|| smooth_frames.last().copied().unwrap_or((0.5, 0.5, 1.0)));
-
-        let z = zoom.clamp(1.0, 3.2);
-        if z <= 1.001 {
-            // Fast path when at 1.0x full-screen wide view: zero resampling blur, bit-exact copy
-            out_buf.copy_from_slice(&in_buf);
-        } else {
-            let uv_w = 1.0 / z;
-            let uv_h = 1.0 / z;
-            let half_w = uv_w * 0.5;
-            let half_h = uv_h * 0.5;
-            let uv_min_x = cx.clamp(half_w, 1.0 - half_w) - half_w;
-            let uv_min_y = cy.clamp(half_h, 1.0 - half_h) - half_h;
-
-            let max_x = (w - 1) as f32;
-            let max_y = (h - 1) as f32;
-
-            // Precompute sub-pixel horizontal bilinear weights for this frame
-            for (dx, slot) in x_table.iter_mut().enumerate() {
-                let u = (uv_min_x + (dx as f32 / max_x) * uv_w).clamp(0.0, 1.0);
-                let sx = u * max_x;
-                let x0 = (sx as usize).min(w - 1);
-                let x1 = (x0 + 1).min(w - 1);
-                let w1 = ((sx - x0 as f32) * 256.0).round() as u32;
-                let w0 = 256u32.saturating_sub(w1);
-                *slot = BilinearXSample {
-                    off0: x0 * 3,
-                    off1: x1 * 3,
-                    w0,
-                    w1,
-                };
-            }
-
-            // Sub-pixel bilinear vertical + horizontal resampling across parallel worker strips
-            let in_slice = &in_buf[..];
-            let x_ref = &x_table[..];
-            let chunk_rows = 135usize; // 8 equal horizontal strips of 135 rows = 1080
-            std::thread::scope(|s| {
-                for (strip_idx, out_strip) in
-                    out_buf.chunks_mut(chunk_rows * stride).enumerate()
-                {
-                    let start_y = strip_idx * chunk_rows;
-                    s.spawn(move || {
-                        let rows_in_strip = out_strip.len() / stride;
-                        for local_y in 0..rows_in_strip {
-                            let dy = start_y + local_y;
-                            let v = (uv_min_y + (dy as f32 / max_y) * uv_h).clamp(0.0, 1.0);
-                            let sy = v * max_y;
-                            let y0 = (sy as usize).min(h - 1);
-                            let y1 = (y0 + 1).min(h - 1);
-                            let wy1 = ((sy - y0 as f32) * 256.0).round() as u32;
-                            let wy0 = 256u32.saturating_sub(wy1);
-
-                            let row0 = &in_slice[y0 * stride..(y0 + 1) * stride];
-                            let row1 = &in_slice[y1 * stride..(y1 + 1) * stride];
-                            let dst_row = &mut out_strip[local_y * stride..(local_y + 1) * stride];
-
-                            for (dx, xs) in x_ref.iter().enumerate() {
-                                let d_off = dx * 3;
-                                let o0 = xs.off0;
-                                let o1 = xs.off1;
-
-                                let r_top = row0[o0] as u32 * xs.w0 + row0[o1] as u32 * xs.w1;
-                                let r_bot = row1[o0] as u32 * xs.w0 + row1[o1] as u32 * xs.w1;
-                                dst_row[d_off] =
-                                    ((r_top * wy0 + r_bot * wy1 + 32768) >> 16) as u8;
-
-                                let g_top =
-                                    row0[o0 + 1] as u32 * xs.w0 + row0[o1 + 1] as u32 * xs.w1;
-                                let g_bot =
-                                    row1[o0 + 1] as u32 * xs.w0 + row1[o1 + 1] as u32 * xs.w1;
-                                dst_row[d_off + 1] =
-                                    ((g_top * wy0 + g_bot * wy1 + 32768) >> 16) as u8;
-
-                                let b_top =
-                                    row0[o0 + 2] as u32 * xs.w0 + row0[o1 + 2] as u32 * xs.w1;
-                                let b_bot =
-                                    row1[o0 + 2] as u32 * xs.w0 + row1[o1 + 2] as u32 * xs.w1;
-                                dst_row[d_off + 2] =
-                                    ((b_top * wy0 + b_bot * wy1 + 32768) >> 16) as u8;
-                            }
-                        }
-                    });
-                }
-            });
-        }
-
-        if enc_in.write_all(&out_buf).is_err() {
-            break;
-        }
-        frame_idx += 1;
     }
+}
 
-    drop(enc_in);
-    let _ = dec.kill();
-    let _ = dec.wait();
-    let status = enc.wait()?;
-
-    if status.success() && zoomed_path.exists() && frame_idx > 0 {
-        let _ = std::fs::copy(&zoomed_path, input_mp4);
-        Ok(zoomed_path)
-    } else {
-        Ok(input_mp4.to_path_buf())
+/// Helper and FFmpeg diagnostics go to a log in the cache directory instead
+/// of being discarded, so failed recordings can be explained.
+fn capture_log() -> Stdio {
+    let dir = crate::bundled::cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("capture.log");
+    // Keep the log from growing without bound across many sessions.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(&path, dir.join("capture.log.1"));
+    }
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            let _ = writeln!(file, "--- {} ---", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+            Stdio::from(file)
+        }
+        Err(_) => Stdio::null(),
     }
 }
 
@@ -1007,4 +1002,16 @@ pub fn export_showcase_recording(
     let (saved_path, _) = session.finish()?;
     let active_codec = hw_backend.ffmpeg_codec_name().to_string();
     Ok((saved_path, total_frames as u64, active_codec))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_display_matching_handles_rotation_and_other_sizes() {
+        assert!(cursor_on_capture((1920, 1080), (1920.0, 1080.0)));
+        assert!(cursor_on_capture((1080, 1920), (1920.0, 1080.0)));
+        assert!(!cursor_on_capture((2560, 1440), (1920.0, 1080.0)));
+    }
 }
