@@ -184,7 +184,18 @@ flatpak run io.github.KunalSiyag.gpu_recorder_rs
 ```
 
 HyperGSR is not on Flathub, so `flatpak update` will not upgrade it. Install the
-newer bundle from the next release to upgrade. The sandbox can access your GPU
+newer bundle from the next release to upgrade. To reinstall a bundle of the version
+you already have (for example a fresh build), add `--reinstall`, otherwise Flatpak
+stops with "This version of io.github.KunalSiyag.gpu_recorder_rs is already installed":
+
+```bash
+flatpak install --user --reinstall hypergsr.flatpak
+```
+
+On COSMIC the Flatpak prints "it appears your Wayland compositor does not support the
+Session Lock protocol" at startup. This warning is harmless: gtk4-layer-shell checks for
+every protocol it knows, and COSMIC hides the privileged session-lock protocol from
+sandboxed apps. HyperGSR never locks the screen, and the docked bar still works. The sandbox can access your GPU
 devices (for the hardware cursor and encoders), your Videos folder, Wayland, and the
 local network for Web Studio. Screen capture goes through the desktop portal. To
 build the bundle yourself, see [`packaging/flatpak`](packaging/flatpak/).

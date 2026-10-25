@@ -848,6 +848,11 @@ impl CursorTracker {
         now_ms.saturating_sub(self.dwell_start_ms)
     }
 
+    /// When the pointer last moved or clicked, if it ever did.
+    pub fn last_motion_ms(&self) -> Option<u64> {
+        (self.last_motion_ms != 0).then_some(self.last_motion_ms)
+    }
+
     pub fn idle_since_motion_ms(&self, now_ms: u64) -> u64 {
         if self.last_motion_ms == 0 {
             0

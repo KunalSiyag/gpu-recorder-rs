@@ -13,6 +13,12 @@
 //
 // stdout carries one line per event:
 //   READY <width> <height>   the first frame went to FFmpeg (video time zero)
+//   STALLED <sec>            no new image for a while; <sec> is the video time
+//                            of the last new image (a still screen also stalls)
+//   FLOWING                  new images arrive again after STALLED
+//   LOST <sec> <message>     the screen-cast stream went away mid-recording; the
+//                            file is finalized, and is worth keeping up to <sec>.
+//                            The exit code is EXIT_STREAM_LOST.
 //   ERROR <message>          the capture failed; the exit code is non-zero
 // Closing stdin, SIGINT, or SIGTERM stops the capture and finalizes the file.
 
@@ -42,7 +48,7 @@
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
 
-#define HELPER_PROTOCOL 3
+#define HELPER_PROTOCOL 4
 
 // libportal.so.1 ABI, declared here so only the shared library is needed.
 typedef struct _XdpPortal XdpPortal;
@@ -81,6 +87,7 @@ enum {
     EXIT_PIPEWIRE = 3,
     EXIT_ENCODER = 4,
     EXIT_NO_FRAMES = 5,
+    EXIT_STREAM_LOST = 6,
 };
 
 // Seconds to wait for the first frame once the stream is connected.
@@ -88,8 +95,15 @@ enum {
 // Re-send the current frame at least this often so a crash loses little and
 // FFmpeg's constant-frame-rate output never stalls on a still screen.
 #define KEEPALIVE_NS 250000000ULL
+// Report STALLED after this long without a new image.
+#define STALL_REPORT_NS 3000000000ULL
+// A stream that stays paused this long after it was streaming has lost its
+// source; renegotiation pauses it only briefly.
+#define PAUSED_LOST_NS 2000000000ULL
 
 static volatile sig_atomic_t g_stop_requested = 0;
+static volatile sig_atomic_t g_stream_lost = 0;
+static char g_lost_reason[256];
 static int g_stop_pipe[2] = {-1, -1};
 
 static void handle_stop_signal(int sig) {
@@ -100,6 +114,16 @@ static void handle_stop_signal(int sig) {
         ssize_t r = write(g_stop_pipe[1], &ch, 1);
         (void)r;
     }
+}
+
+// The source of a running stream went away (the compositor's portal crashed
+// or ended the share). The writer finalizes the file and reports LOST.
+static void stream_lost(const char *reason) {
+    if (!g_stream_lost) {
+        snprintf(g_lost_reason, sizeof(g_lost_reason), "%s", reason);
+        __atomic_store_n(&g_stream_lost, 1, __ATOMIC_RELEASE);
+    }
+    handle_stop_signal(0);
 }
 
 typedef struct {
@@ -123,7 +147,12 @@ typedef struct {
     struct pw_core *pw_core;
     struct pw_stream *pw_stream;
     struct spa_hook stream_listener;
+    struct pw_registry *pw_registry;
+    struct spa_hook registry_listener;
     struct spa_video_info format;
+    // Set by the PipeWire thread, read by the writer thread.
+    bool ever_streamed;
+    uint64_t paused_since_ns;
 
     pthread_mutex_t frame_lock;
     uint8_t *latest_frame;
@@ -394,6 +423,9 @@ static void *encoder_writer_thread(void *arg) {
     uint64_t last_write_ns = 0;
     bool warned_resize = false;
     bool partial_write = false;
+    uint64_t ready_ns = 0;
+    uint64_t last_fresh_ns = 0;
+    bool stalled = false;
     int exit_code = 0;
 
     while (!stop_signalled(fds, nfds)) {
@@ -456,6 +488,11 @@ static void *encoder_writer_thread(void *arg) {
         pthread_mutex_unlock(&app->frame_lock);
 
         now = monotonic_ns();
+        uint64_t paused = __atomic_load_n(&app->paused_since_ns, __ATOMIC_RELAXED);
+        if (paused && now > paused && now - paused > PAUSED_LOST_NS) {
+            stream_lost("the screen-cast stream stopped");
+            continue;
+        }
         if (!buf) {
             if (now - started_ns > (uint64_t)FIRST_FRAME_TIMEOUT_S * 1000000000ULL) {
                 emit("ERROR no frames arrived from the screen-cast stream");
@@ -482,16 +519,38 @@ static void *encoder_writer_thread(void *arg) {
                 exit_code = EXIT_ENCODER;
                 break;
             }
-            if (last_write_ns == 0) emit("READY %u %u", enc.w, enc.h);
+            if (last_write_ns == 0) {
+                emit("READY %u %u", enc.w, enc.h);
+                ready_ns = now;
+            }
             last_write_ns = now;
+        }
+        if (fresh) {
+            last_fresh_ns = now;
+            if (stalled) emit("FLOWING");
+            stalled = false;
+        } else if (ready_ns && !stalled && now - last_fresh_ns > STALL_REPORT_NS) {
+            emit("STALLED %.3f", (double)(last_fresh_ns - ready_ns) / 1e9);
+            stalled = true;
         }
     }
 
-    // One last copy of the current frame keeps a still tail in the file.
-    if (exit_code == 0 && enc.fd >= 0 && last_write_ns && !partial_write) {
+    bool lost = __atomic_load_n(&g_stream_lost, __ATOMIC_ACQUIRE);
+    // One last copy of the current frame keeps a still tail in the file; a
+    // lost stream has frozen already, so it gets none.
+    if (exit_code == 0 && enc.fd >= 0 && last_write_ns && !partial_write && !lost) {
         write_frame(enc.fd, buf, (size_t)enc.w * enc.h * 4, fds, nfds);
     }
     bool clean = finish_encoder(&enc);
+    if (exit_code == 0 && lost) {
+        if (last_write_ns) {
+            emit("LOST %.3f %s", (double)(last_fresh_ns - ready_ns) / 1e9, g_lost_reason);
+            exit_code = EXIT_STREAM_LOST;
+        } else {
+            emit("ERROR %s", g_lost_reason);
+            exit_code = EXIT_NO_FRAMES;
+        }
+    }
     if (exit_code == 0 && !clean && last_write_ns) {
         emit("ERROR ffmpeg did not finish the file cleanly");
         exit_code = EXIT_ENCODER;
@@ -686,6 +745,7 @@ static void on_stream_process(void *userdata) {
                     }
                 }
                 app->has_first_frame = true;
+                app->ever_streamed = true;
                 app->frame_serial++;
                 pthread_cond_signal(&app->frame_ready);
             }
@@ -698,17 +758,46 @@ static void on_stream_process(void *userdata) {
 
 static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
                                     enum pw_stream_state state, const char *error) {
-    (void)userdata;
-    (void)old;
+    CaptureApp *app = (CaptureApp *)userdata;
+    log_err("stream %s -> %s%s%s", pw_stream_state_as_string(old),
+            pw_stream_state_as_string(state), error ? ": " : "", error ? error : "");
+    pthread_mutex_lock(&app->frame_lock);
+    bool streamed = app->ever_streamed;
+    pthread_mutex_unlock(&app->frame_lock);
+
+    uint64_t paused_since = 0;
+    if (state == PW_STREAM_STATE_PAUSED && streamed) paused_since = monotonic_ns();
+    __atomic_store_n(&app->paused_since_ns, paused_since, __ATOMIC_RELAXED);
+
     if (state == PW_STREAM_STATE_ERROR) {
-        emit("ERROR PipeWire stream failed (%s)", error ? error : "unknown");
-        handle_stop_signal(0);
+        if (streamed) {
+            char reason[200];
+            snprintf(reason, sizeof(reason), "the screen-cast stream failed (%s)",
+                     error ? error : "unknown");
+            stream_lost(reason);
+        } else {
+            emit("ERROR PipeWire stream failed (%s)", error ? error : "unknown");
+            handle_stop_signal(0);
+        }
     } else if (state == PW_STREAM_STATE_UNCONNECTED) {
         // The compositor ended the share (window closed, share revoked).
-        log_err("screen-cast stream disconnected");
-        handle_stop_signal(0);
+        if (streamed) {
+            stream_lost("the screen-cast stream was disconnected");
+        } else {
+            handle_stop_signal(0);
+        }
     }
 }
+
+static void on_registry_global_remove(void *userdata, uint32_t id) {
+    CaptureApp *app = (CaptureApp *)userdata;
+    if (id == app->pw_node_id) stream_lost("the screen-cast source went away");
+}
+
+static const struct pw_registry_events registry_events = {
+    PW_VERSION_REGISTRY_EVENTS,
+    .global_remove = on_registry_global_remove,
+};
 
 static const struct pw_stream_events stream_events = {
     PW_VERSION_STREAM_EVENTS,
@@ -816,6 +905,11 @@ int main(int argc, char **argv) {
     if (!app.pw_core) {
         emit("ERROR cannot connect to PipeWire");
         return EXIT_PIPEWIRE;
+    }
+    // Watching the node catches a portal that dies without ending the stream.
+    app.pw_registry = pw_core_get_registry(app.pw_core, PW_VERSION_REGISTRY, 0);
+    if (app.pw_registry) {
+        pw_registry_add_listener(app.pw_registry, &app.registry_listener, &registry_events, &app);
     }
     app.pw_stream = pw_stream_new(app.pw_core, "hypergsr-screencast",
                                   pw_properties_new(PW_KEY_MEDIA_TYPE, "Video",

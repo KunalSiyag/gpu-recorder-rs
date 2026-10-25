@@ -117,6 +117,19 @@ pub struct CaptureStatus {
     pub error: Option<String>,
     /// FFmpeg's pid, which is also its process group.
     pub encoder_pid: Option<i32>,
+    /// Since when no new image arrived, and the video time of the last one.
+    pub stalled: Option<(Instant, f64)>,
+    /// The stream went away mid-recording: the video time worth keeping, and why.
+    pub lost: Option<(f64, String)>,
+}
+
+/// How a capture that ended on its own ended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CaptureExit {
+    /// The screen share broke mid-recording; what was captured is intact and
+    /// the recording can continue in a new capture.
+    Interrupted(String),
+    Failed(String),
 }
 
 /// How a screen recording is captured.
@@ -138,9 +151,13 @@ pub struct FinishedCapture {
     pub zoom_events: Vec<RecordedZoomEvent>,
     /// Set when the helper reported a failure or exited abnormally.
     pub error: Option<String>,
+    /// Video time after which the capture only repeats a frozen frame.
+    pub keep_sec: Option<f64>,
 }
 
-const HELPER_PROTOCOL: &str = "3";
+const HELPER_PROTOCOL: &str = "4";
+/// The helper's exit code after it reported LOST.
+const EXIT_STREAM_LOST: i32 = 6;
 
 pub struct ActiveEncoderSession {
     pub kind: RecordingEngineKind,
@@ -151,6 +168,33 @@ pub struct ActiveEncoderSession {
     pub height: usize,
     pub fps: u32,
     pub zoom_events: Vec<RecordedZoomEvent>,
+    /// Set when the recorder itself ended a capture whose stream froze.
+    interrupted: Option<(f64, String)>,
+}
+
+/// Applies one line of the helper's stdout protocol.
+fn apply_helper_line(st: &mut CaptureStatus, line: &str) {
+    if let Some(rest) = line.strip_prefix("READY ") {
+        let mut it = rest.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
+        st.size = it.next().zip(it.next());
+        st.ready_at.get_or_insert_with(Instant::now);
+    } else if let Some(msg) = line.strip_prefix("ERROR ") {
+        st.error.get_or_insert_with(|| msg.to_string());
+    } else if let Some(pid) = line.strip_prefix("ENCODER ") {
+        st.encoder_pid = pid.trim().parse().ok().filter(|&p: &i32| p > 0);
+    } else if let Some(sec) = line.strip_prefix("STALLED ") {
+        if let Ok(sec) = sec.trim().parse::<f64>() {
+            st.stalled = Some((Instant::now(), sec));
+        }
+    } else if line == "FLOWING" {
+        st.stalled = None;
+    } else if let Some(rest) = line.strip_prefix("LOST ") {
+        let (sec, reason) = rest.split_once(' ').unwrap_or((rest, ""));
+        if let Ok(sec) = sec.parse::<f64>() {
+            let reason = if reason.is_empty() { "the screen share stopped" } else { reason };
+            st.lost = Some((sec, reason.to_string()));
+        }
+    }
 }
 
 impl ActiveEncoderSession {
@@ -205,16 +249,7 @@ impl ActiveEncoderSession {
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
-                    let mut st = status.lock();
-                    if let Some(rest) = line.strip_prefix("READY ") {
-                        let mut it = rest.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
-                        st.size = it.next().zip(it.next());
-                        st.ready_at.get_or_insert_with(Instant::now);
-                    } else if let Some(msg) = line.strip_prefix("ERROR ") {
-                        st.error.get_or_insert_with(|| msg.to_string());
-                    } else if let Some(pid) = line.strip_prefix("ENCODER ") {
-                        st.encoder_pid = pid.trim().parse().ok().filter(|&p: &i32| p > 0);
-                    }
+                    apply_helper_line(&mut status.lock(), &line);
                 }
             })
         });
@@ -228,6 +263,7 @@ impl ActiveEncoderSession {
             height: 0,
             fps: options.fps,
             zoom_events: Vec::with_capacity(4096),
+            interrupted: None,
         })
     }
 
@@ -239,8 +275,9 @@ impl ActiveEncoderSession {
         }
     }
 
-    /// `Some(reason)` once the capture process has exited on its own.
-    pub fn poll_failure(&mut self) -> Option<String> {
+    /// Set once the capture process has exited on its own (or after
+    /// [`Self::interrupt`]).
+    pub fn poll_exit(&mut self) -> Option<CaptureExit> {
         let RecordingEngineKind::ZeroCopyGsr { child, status, reader, .. } = &mut self.kind else {
             return None;
         };
@@ -249,11 +286,37 @@ impl ActiveEncoderSession {
             let _ = reader.join();
         }
         let st = status.lock();
-        Some(match (&st.error, st.ready_at) {
+        if let Some((_, reason)) = self.interrupted.as_ref().or(st.lost.as_ref()) {
+            if st.ready_at.is_some() && st.error.is_none() {
+                return Some(CaptureExit::Interrupted(reason.clone()));
+            }
+        }
+        Some(CaptureExit::Failed(match (&st.error, st.ready_at) {
             (Some(msg), _) => msg.clone(),
             (None, None) if exit.success() => "screen sharing was cancelled".to_string(),
             (None, _) => format!("the capture process stopped unexpectedly ({exit})"),
-        })
+        }))
+    }
+
+    /// Since when the stream has sent no new image, and the video time of
+    /// the last one. A still screen stalls too.
+    pub fn stalled(&self) -> Option<(Instant, f64)> {
+        match &self.kind {
+            RecordingEngineKind::ZeroCopyGsr { status, .. } => status.lock().stalled,
+            RecordingEngineKind::FfmpegPipe { .. } => None,
+        }
+    }
+
+    /// Ends a capture whose stream has frozen; [`Self::poll_exit`] then
+    /// reports it as interrupted, keeping the video up to `keep_sec`.
+    pub fn interrupt(&mut self, keep_sec: f64, reason: &str) {
+        if self.interrupted.is_some() {
+            return;
+        }
+        self.interrupted = Some((keep_sec, reason.to_string()));
+        if let RecordingEngineKind::ZeroCopyGsr { stdin, .. } = &mut self.kind {
+            drop(stdin.take());
+        }
     }
 
     fn portal_restore_token_file(source: CaptureSource) -> Result<PathBuf> {
@@ -451,6 +514,7 @@ impl ActiveEncoderSession {
             height,
             fps,
             zoom_events: Vec::new(),
+            interrupted: None,
         })
     }
 
@@ -537,6 +601,7 @@ impl ActiveEncoderSession {
     /// a few seconds, so call it off the UI thread.
     pub fn finish_capture(mut self) -> FinishedCapture {
         let mut error = None;
+        let mut keep_sec = self.interrupted.as_ref().map(|(sec, _)| *sec);
         match self.kind {
             RecordingEngineKind::ZeroCopyGsr {
                 ref mut child,
@@ -552,7 +617,10 @@ impl ActiveEncoderSession {
                 }
                 // A helper that died or was killed leaves FFmpeg finishing the
                 // file on its own; wait for it so nobody reads a half-written file.
-                let helper_clean = exit.is_some_and(|e| e.success());
+                let lost = status.lock().lost.clone();
+                let helper_clean = exit.is_some_and(|e| {
+                    e.success() || (lost.is_some() && e.code() == Some(EXIT_STREAM_LOST))
+                });
                 if let (false, Some(pid)) = (helper_clean, status.lock().encoder_pid) {
                     reap_orphaned_encoder(pid);
                 }
@@ -560,8 +628,11 @@ impl ActiveEncoderSession {
                 error = st.error.clone();
                 if error.is_none() && st.ready_at.is_none() {
                     error = Some("no frames were captured".to_string());
-                } else if error.is_none() && !exit.is_some_and(|e| e.success()) {
+                } else if error.is_none() && !helper_clean {
                     error = Some("the capture process did not exit cleanly".to_string());
+                }
+                if let Some((sec, _)) = lost {
+                    keep_sec = Some(keep_sec.map_or(sec, |k| k.min(sec)));
                 }
             }
             RecordingEngineKind::FfmpegPipe {
@@ -576,6 +647,7 @@ impl ActiveEncoderSession {
             path: self.output_path,
             zoom_events: self.zoom_events,
             error,
+            keep_sec,
         }
     }
 
@@ -1007,6 +1079,21 @@ pub fn export_showcase_recording(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_stall_and_loss_reports() {
+        let mut st = CaptureStatus::default();
+        apply_helper_line(&mut st, "READY 1920 1080");
+        assert_eq!(st.size, Some((1920, 1080)));
+        apply_helper_line(&mut st, "STALLED 64.900");
+        assert_eq!(st.stalled.map(|(_, sec)| sec), Some(64.9));
+        apply_helper_line(&mut st, "FLOWING");
+        assert!(st.stalled.is_none());
+        apply_helper_line(&mut st, "LOST 65.250 the screen-cast source went away");
+        assert_eq!(st.lost, Some((65.25, "the screen-cast source went away".to_string())));
+        apply_helper_line(&mut st, "LOST nope");
+        assert_eq!(st.lost.as_ref().map(|l| l.0), Some(65.25));
+    }
 
     #[test]
     fn cursor_display_matching_handles_rotation_and_other_sizes() {
