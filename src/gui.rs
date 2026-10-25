@@ -1055,6 +1055,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     rec_btn_box.append(&rec_btn_lbl);
     rec_btn.set_child(Some(&rec_btn_box));
 
+    // Shown while a recording is paused because its screen share broke.
+    let resume_btn = Button::with_label("Resume");
+    resume_btn.add_css_class("shutter-rec");
+    resume_btn.set_visible(false);
+
     // 4. Quick Dark / Light Theme Pill
     let theme_btn = Button::new();
     theme_btn.add_css_class("theme-pill");
@@ -1087,6 +1092,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     top_row.append(&brand_box);
     top_row.append(&zoom_pill_btn);
     top_row.append(&top_spacer);
+    top_row.append(&resume_btn);
     top_row.append(&rec_btn);
     top_row.append(&theme_btn);
     top_row.append(&expand_btn);
@@ -2234,7 +2240,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 footer.set_text("Still saving the last recording…");
                 return;
             }
-            if st.lock().encoder_session.is_some() {
+            if st.lock().is_recording() {
                 stop_and_save(None);
                 return;
             }
@@ -2250,6 +2256,21 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     s_lbl.set_text("HyperGSR");
                     footer.set_text(&format!("{err:#}"));
                 }
+            }
+        });
+    }
+
+    {
+        let st = state.clone();
+        let s_lbl = status_lbl.clone();
+        resume_btn.connect_clicked(move |btn| {
+            let resumed = st.lock().resume_recording();
+            match resumed {
+                Ok(()) => {
+                    btn.set_visible(false);
+                    s_lbl.set_text("Starting…");
+                }
+                Err(err) => btn.set_tooltip_text(Some(&format!("Could not resume: {err:#}"))),
             }
         });
     }
@@ -2335,7 +2356,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let busy_flag = bg_zoom_busy.clone();
         let close_btn = close_btn.clone();
         window.connect_close_request(move |_| {
-            let pending = st.lock().encoder_session.is_some() || busy_flag.load(Ordering::Relaxed);
+            let pending = st.lock().is_recording() || busy_flag.load(Ordering::Relaxed);
             if pending {
                 close_btn.emit_clicked();
                 return glib::Propagation::Stop;
@@ -2363,6 +2384,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let learn_flag = learning_combo.clone();
         let rec_combo_b = record_combo_btn.clone();
         let preset_btns = combo_preset_btns.clone();
+        let resume_b = resume_btn.clone();
+        let win = window.clone();
+        let keep_on_screen = keep_island_on_screen.clone();
+        let app_n = app.clone();
+        let mut last_paused: Option<String> = None;
         let mut last_z_str = String::new();
         let mut last_c_str = String::new();
         let mut last_s_str = String::new();
@@ -2380,7 +2406,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let Some(mut g) = st.try_lock() else {
                 return ControlFlow::Continue;
             };
-            if !hot && g.encoder_session.is_none() && idle_div % 4 != 0 {
+            if !hot && !g.is_recording() && idle_div % 4 != 0 {
                 return ControlFlow::Continue;
             }
             g.tick();
@@ -2391,7 +2417,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let target_z = g.zoom_cfg.target_zoom;
             let manual_locked = g.zoom_engine.manual_locked;
             let is_combo_only = matches!(g.zoom_cfg.mode, AutoZoomMode::Manual);
-            let is_rec = g.encoder_session.is_some();
+            let is_rec = g.is_recording();
+            let paused = g.capture_paused.clone();
             let elapsed = g.recording_elapsed_sec();
 
             // Check if user is in "Record Combo…" self-registration mode and performed a global gesture/button/key
@@ -2476,6 +2503,31 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 return ControlFlow::Continue;
             }
 
+            if paused != last_paused {
+                resume_b.set_visible(paused.is_some());
+                resume_b.set_tooltip_text(Some("Continue recording into the same video"));
+                match &paused {
+                    Some(reason) => {
+                        let hint = format!(
+                            "Screen sharing was interrupted ({reason}). Press Resume to continue \
+                             the same video, or Stop to save it."
+                        );
+                        s_lbl.set_tooltip_text(Some(&hint));
+                        let note = gio::Notification::new("Recording paused");
+                        note.set_body(Some(&hint));
+                        app_n.send_notification(Some("capture-paused"), &note);
+                    }
+                    None => {
+                        s_lbl.set_tooltip_text(None);
+                        app_n.withdraw_notification("capture-paused");
+                    }
+                }
+                win.set_default_size(1, 1);
+                let keep_on_screen = keep_on_screen.clone();
+                glib::timeout_add_local_once(Duration::from_millis(80), move || keep_on_screen());
+                last_paused = paused.clone();
+            }
+
             if let Some(lbl) = learned_label {
                 for b in &preset_btns {
                     b.remove_css_class("seg-btn-active");
@@ -2552,7 +2604,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 was_zoomed = is_zoomed;
             }
 
-            if is_rec && !capture_live {
+            if is_rec && paused.is_some() {
+                let new_s = format!("⏸ Paused {:02}:{:02}", (elapsed as u64) / 60, (elapsed as u64) % 60);
+                if new_s != last_s_str {
+                    s_lbl.set_text(&new_s);
+                    last_s_str = new_s;
+                }
+            } else if is_rec && !capture_live {
                 if last_s_str != "Starting…" {
                     s_lbl.set_text("Starting…");
                     last_s_str = "Starting…".to_string();

@@ -3,8 +3,8 @@ use crate::compositor::{FrameCompositor, FrameStyleConfig};
 use crate::cursor::{CursorConfig, CursorSample, CursorTracker, KeystrokeOverlay};
 use crate::decompiled_gsr::GsrDecompiledReport;
 use crate::encoder::{
-    export_showcase_recording, ActiveEncoderSession, CaptureOptions, HardwareEncoderBackend,
-    RecordedZoomEvent,
+    export_showcase_recording, ActiveEncoderSession, CaptureExit, CaptureOptions,
+    FinishedCapture, HardwareEncoderBackend, RecordedZoomEvent,
 };
 use crate::settings::{CaptureSource, RecorderSettings};
 use crate::studio_render::{self, RenderJob};
@@ -12,7 +12,7 @@ use crate::zoom_engine::{CameraViewport, ZoomConfig, ZoomEngine, ZoomKeyframe};
 use anyhow::Result;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,6 +20,9 @@ use std::time::Instant;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
     pub is_recording: bool,
+    /// Why the recording is paused, waiting to be resumed.
+    #[serde(default)]
+    pub capture_paused: Option<String>,
     pub recording_elapsed_sec: f32,
     pub recorded_frames: u64,
     pub active_encoder: String,
@@ -63,6 +66,16 @@ pub struct StudioState {
     /// Settings the running recording was started with; changing the drawer
     /// mid-recording only affects the next one.
     recording_settings: Option<RecorderSettings>,
+    /// Finished parts of the running recording. When the screen share breaks,
+    /// the capture ends its part and the recording pauses; Resume records
+    /// the next part, and Stop joins them.
+    recorded_parts: Vec<FinishedCapture>,
+    /// Why the running recording is paused, waiting for Resume.
+    pub capture_paused: Option<String>,
+    /// Recorded time of the finished parts, for the timer.
+    parts_elapsed_sec: f32,
+    /// The file the joined recording is captured to, and how.
+    capture_target: Option<(PathBuf, CaptureOptions)>,
     /// Lazy-allocated buffers used ONLY when `--web` requests a rendered JPEG frame
     lazy_web_buffers: Option<(ScreenCapturer, FrameBuffer, FrameBuffer)>,
 }
@@ -108,6 +121,10 @@ impl StudioState {
             settings,
             repick_source: false,
             recording_settings: None,
+            recorded_parts: Vec::new(),
+            capture_paused: None,
+            parts_elapsed_sec: 0.0,
+            capture_target: None,
             lazy_web_buffers: None,
         }
     }
@@ -117,9 +134,16 @@ impl StudioState {
     }
 
     pub fn recording_elapsed_sec(&self) -> f32 {
-        self.recording_start
-            .map(|t| t.elapsed().as_secs_f32())
-            .unwrap_or(0.0)
+        self.parts_elapsed_sec
+            + self
+                .recording_start
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0)
+    }
+
+    /// A recording is running, possibly paused after a broken screen share.
+    pub fn is_recording(&self) -> bool {
+        self.encoder_session.is_some() || !self.recorded_parts.is_empty()
     }
 
     pub fn read_rss_mb() -> f32 {
@@ -232,6 +256,40 @@ impl StudioState {
                 off_capture,
             );
         }
+        self.detect_frozen_capture(now_ms, off_capture);
+    }
+
+    /// Ends the current part when the stream stopped sending images while
+    /// the cursor kept moving on the recorded monitor: the portal died
+    /// without closing the stream. A still screen with a still cursor is
+    /// left alone. Only an embedded cursor redraws the screen when it moves.
+    fn detect_frozen_capture(&mut self, now_ms: u64, off_capture: bool) {
+        // The helper reports a stall after this long without a new image.
+        const STALL_REPORT_MS: u64 = 3_000;
+        const FROZEN_AFTER_MS: u64 = 6_000;
+        // Motion this soon after the last image may still be in flight.
+        const MOTION_GRACE_MS: u64 = 1_500;
+        let watch = self
+            .recording_settings
+            .as_ref()
+            .is_some_and(|s| s.source != CaptureSource::Window && s.show_cursor);
+        if !watch || off_capture || !self.cursor_tracker.has_live_source() {
+            return;
+        }
+        let Some(last_motion) = self.cursor_tracker.last_motion_ms() else {
+            return;
+        };
+        let Some(session) = self.encoder_session.as_mut() else {
+            return;
+        };
+        let Some((since, last_image_sec)) = session.stalled() else {
+            return;
+        };
+        let stalled_ms = since.elapsed().as_millis() as u64 + STALL_REPORT_MS;
+        let idle_ms = now_ms.saturating_sub(last_motion);
+        if stalled_ms >= FROZEN_AFTER_MS && idle_ms < 1_000 && idle_ms + MOTION_GRACE_MS < stalled_ms {
+            session.interrupt(last_image_sec, "the screen stopped updating");
+        }
     }
 
     /// Used only by the optional `--web` HTTP server to render a 640x360 preview JPEG.
@@ -281,7 +339,7 @@ impl StudioState {
     }
 
     pub fn start_recording(&mut self) -> Result<PathBuf> {
-        if self.encoder_session.is_some() {
+        if self.is_recording() {
             self.stop_recording()?;
         }
         let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
@@ -307,27 +365,98 @@ impl StudioState {
             show_cursor: settings.show_cursor,
             repick: self.repick_source,
         };
-        let session = ActiveEncoderSession::start_capture(&capture_path, &options)?;
+        let session = match ActiveEncoderSession::start_capture(&capture_path, &options) {
+            Ok(session) => session,
+            Err(err) => {
+                let _ = std::fs::remove_file(&capture_path);
+                return Err(err);
+            }
+        };
         self.repick_source = false;
         self.recording_settings = Some(settings.clone());
         self.target_fps = settings.fps;
         self.recording_start = None;
         self.encoder_session = Some(session);
+        self.recorded_parts.clear();
+        self.capture_paused = None;
+        self.parts_elapsed_sec = 0.0;
+        self.capture_target = Some((capture_path.clone(), CaptureOptions { repick: false, ..options }));
         self.cursor_tracker
             .push_keystroke("● REC Started (Zero-Copy GPU)", self.now_ms());
         Ok(capture_path)
     }
 
+    /// Continues a paused recording in a new part, reusing the remembered
+    /// screen or window. The portal may show its picker if it forgot it.
+    pub fn resume_recording(&mut self) -> Result<()> {
+        if self.encoder_session.is_some() || self.capture_paused.is_none() {
+            return Ok(());
+        }
+        let Some((target, options)) = self.capture_target.clone() else {
+            anyhow::bail!("there is no paused recording to resume");
+        };
+        let part = part_path(&target, self.recorded_parts.len() + 1);
+        let session = ActiveEncoderSession::start_capture(&part, &options)?;
+        self.encoder_session = Some(session);
+        self.recording_start = None;
+        self.capture_paused = None;
+        self.cursor_tracker.push_keystroke("● REC Resumed", self.now_ms());
+        Ok(())
+    }
+
     /// `Some(reason)` when the running capture died on its own (for example
-    /// the share was revoked or the encoder failed).
+    /// the encoder failed) and the recording has to stop. A broken screen
+    /// share pauses the recording instead; see [`Self::capture_paused`].
     pub fn poll_capture_failure(&mut self) -> Option<String> {
-        self.encoder_session.as_mut()?.poll_failure()
+        let session = self.encoder_session.as_mut()?;
+        let exit = session.poll_exit()?;
+        let never_started = session.ready_at().is_none();
+        match exit {
+            CaptureExit::Interrupted(reason) => {
+                self.end_part();
+                self.capture_paused = Some(reason);
+                None
+            }
+            // A resume that never got a frame (a cancelled picker) leaves the
+            // recording paused rather than ending it.
+            CaptureExit::Failed(reason) if never_started && !self.recorded_parts.is_empty() => {
+                if let Some(session) = self.encoder_session.take() {
+                    let _ = std::fs::remove_file(session.finish_capture().path);
+                }
+                self.capture_paused = Some(format!("could not resume: {reason}"));
+                None
+            }
+            CaptureExit::Failed(reason) => Some(reason),
+        }
+    }
+
+    /// Finalizes the capture that just ended as one part of the recording.
+    fn end_part(&mut self) {
+        let Some(session) = self.encoder_session.take() else {
+            return;
+        };
+        let live_sec = self.recording_start.take().map(|t| t.elapsed().as_secs_f64());
+        let done = session.finish_capture();
+        self.parts_elapsed_sec += done.keep_sec.or(live_sec).unwrap_or(0.0) as f32;
+        self.recorded_parts.push(done);
     }
 
     /// Detaches the running capture so it can be finalized and rendered on a
     /// worker thread with [`StopJob::complete`], keeping the UI responsive.
     pub fn take_recording(&mut self) -> Option<StopJob> {
-        let session = self.encoder_session.take()?;
+        if !self.is_recording() {
+            return None;
+        }
+        let session = self.encoder_session.take();
+        let parts = std::mem::take(&mut self.recorded_parts);
+        let capture = self
+            .capture_target
+            .take()
+            .map(|(path, _)| path)
+            .or_else(|| session.as_ref().map(|s| s.output_path.clone()))
+            .or_else(|| parts.first().map(|p| p.path.clone()))?;
+        self.capture_paused = None;
+        self.parts_elapsed_sec = 0.0;
         self.recording_start = None;
         self.cursor_tracker
             .push_keystroke("✔ Saved GPU Recording", self.now_ms());
@@ -341,7 +470,9 @@ impl StudioState {
             ..settings
         };
         Some(StopJob {
+            parts,
             session,
+            capture,
             auto_zoom: self.auto_apply_zoom_on_stop
                 && settings.auto_zoom
                 && settings.source != CaptureSource::Window,
@@ -380,12 +511,13 @@ impl StudioState {
     }
 
     pub fn snapshot(&self) -> TelemetrySnapshot {
-        let (is_recording, recorded_frames, active_encoder) = match &self.encoder_session {
-            Some(s) => (true, s.frames_written, s.active_backend.clone()),
-            None => (false, 0, self.encoder_backend.short_badge().to_string()),
+        let (recorded_frames, active_encoder) = match &self.encoder_session {
+            Some(s) => (s.frames_written, s.active_backend.clone()),
+            None => (0, self.encoder_backend.short_badge().to_string()),
         };
         TelemetrySnapshot {
-            is_recording,
+            is_recording: self.is_recording(),
+            capture_paused: self.capture_paused.clone(),
             recording_elapsed_sec: self.recording_elapsed_sec(),
             recorded_frames,
             active_encoder,
@@ -404,7 +536,11 @@ impl StudioState {
 
 /// A stopped recording waiting to be finalized and rendered.
 pub struct StopJob {
-    session: ActiveEncoderSession,
+    /// Earlier parts of a recording whose screen share broke.
+    parts: Vec<FinishedCapture>,
+    session: Option<ActiveEncoderSession>,
+    /// Where the whole recording's capture goes.
+    capture: PathBuf,
     auto_zoom: bool,
     settings: RecorderSettings,
 }
@@ -414,7 +550,11 @@ impl StopJob {
     /// MP4 to show the user. A failed render falls back to the plain capture,
     /// so a recording is never lost to a post-processing error.
     pub fn complete(self, progress: &AtomicU32) -> Result<PathBuf> {
-        let done = self.session.finish_capture();
+        let mut parts = self.parts;
+        if let Some(session) = self.session {
+            parts.push(session.finish_capture());
+        }
+        let done = join_parts(parts, &self.capture)?;
         let capture = done.path;
         if !capture.exists() || std::fs::metadata(&capture).is_ok_and(|m| m.len() == 0) {
             let _ = std::fs::remove_file(&capture);
@@ -458,6 +598,114 @@ impl StopJob {
 /// Suffix of the raw capture next to where the final MP4 will go.
 const CAPTURE_SUFFIX: &str = ".capture.mp4";
 
+/// `HyperGSR_<time>.capture.mp4` records its second part to
+/// `HyperGSR_<time>.part2.capture.mp4`.
+fn part_path(capture: &Path, n: usize) -> PathBuf {
+    let name = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = name.strip_suffix(CAPTURE_SUFFIX).unwrap_or(&name);
+    capture.with_file_name(format!("{stem}.part{n}{CAPTURE_SUFFIX}"))
+}
+
+/// Where a part sits in the joined video: the file time its first frame
+/// has, and the file time it is kept up to.
+struct PartSpan {
+    video_start: f64,
+    kept: f64,
+}
+
+/// Moves each part's telemetry (timed from its own first frame) onto the
+/// joined video's timeline, which is timed from the first part's first frame.
+fn merge_part_events(parts: &[(PartSpan, Vec<RecordedZoomEvent>)]) -> Vec<RecordedZoomEvent> {
+    let Some(first) = parts.first() else {
+        return Vec::new();
+    };
+    let base = first.0.video_start;
+    let mut offset = 0.0f64;
+    let mut merged = Vec::new();
+    for (span, events) in parts {
+        let shift = offset + span.video_start - base;
+        let last = span.kept - span.video_start;
+        merged.extend(
+            events
+                .iter()
+                .filter(|e| f64::from(e.timestamp_sec) <= last)
+                .map(|e| RecordedZoomEvent {
+                    timestamp_sec: (shift + f64::from(e.timestamp_sec)) as f32,
+                    ..*e
+                }),
+        );
+        offset += span.kept;
+    }
+    merged
+}
+
+/// Turns the recording's parts into one capture at `capture`, dropping the
+/// frozen tail of an interrupted part. If joining fails, the first part is
+/// kept as the capture and the others stay next to it as separate videos.
+fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCapture> {
+    let last_error = parts.iter().rev().find_map(|p| p.error.clone());
+    let (parts, empty): (Vec<_>, Vec<_>) = parts
+        .into_iter()
+        .partition(|p| std::fs::metadata(&p.path).is_ok_and(|m| m.len() > 0));
+    for part in &empty {
+        let _ = std::fs::remove_file(&part.path);
+    }
+    if parts.is_empty() {
+        anyhow::bail!(last_error.unwrap_or_else(|| "nothing was recorded".to_string()));
+    }
+    if parts.len() == 1 && parts[0].keep_sec.is_none() {
+        let mut only = parts.into_iter().next().expect("one part");
+        if only.path != capture && std::fs::rename(&only.path, capture).is_ok() {
+            only.path = capture.to_path_buf();
+        }
+        return Ok(only);
+    }
+
+    // The joined file takes the capture's name, so the first part moves aside.
+    let mut parts = parts;
+    if parts[0].path == capture {
+        let moved = part_path(capture, 1);
+        std::fs::rename(capture, &moved)?;
+        parts[0].path = moved;
+    }
+    let mut spans = Vec::with_capacity(parts.len());
+    let mut segments = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let info = crate::ffmpeg::probe_video(&part.path)?;
+        let end = part.keep_sec.map(|k| (info.video_start_sec + k).min(info.duration_sec));
+        spans.push(PartSpan {
+            video_start: info.video_start_sec,
+            kept: end.unwrap_or(info.duration_sec),
+        });
+        segments.push(crate::ffmpeg::Segment { path: part.path.clone(), end_sec: end });
+    }
+    if let Err(err) = crate::ffmpeg::concat_segments(&segments, capture) {
+        let _ = std::fs::remove_file(capture);
+        eprintln!("[HyperGSR] {err:#}; keeping the parts as separate videos");
+        let mut first = parts.remove(0);
+        if std::fs::rename(&first.path, capture).is_ok() {
+            first.path = capture.to_path_buf();
+        }
+        for (i, part) in parts.iter().enumerate() {
+            let _ = std::fs::rename(&part.path, final_path(&part_path(capture, i + 2)));
+        }
+        return Ok(first);
+    }
+    let paired: Vec<_> = spans
+        .into_iter()
+        .zip(parts.iter().map(|p| p.zoom_events.clone()))
+        .collect();
+    for part in &parts {
+        let _ = std::fs::remove_file(&part.path);
+    }
+    Ok(FinishedCapture {
+        path: capture.to_path_buf(),
+        zoom_events: merge_part_events(&paired),
+        error: last_error,
+        keep_sec: None,
+    })
+}
+
 /// `HyperGSR_<time>.capture.mp4` becomes `HyperGSR_<time>.mp4`.
 fn final_path(capture: &std::path::Path) -> PathBuf {
     let name = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -492,6 +740,44 @@ fn save_telemetry(capture: &std::path::Path, events: &[RecordedZoomEvent]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(t: f32) -> RecordedZoomEvent {
+        RecordedZoomEvent {
+            timestamp_sec: t,
+            center_x: 0.5,
+            center_y: 0.5,
+            zoom: 1.0,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            clicked: false,
+            manual_lock: false,
+            off_capture: false,
+        }
+    }
+
+    #[test]
+    fn parts_are_named_after_the_capture() {
+        let p = std::path::Path::new("/v/HyperGSR_2026-10-25_12-31-38.capture.mp4");
+        assert_eq!(
+            part_path(p, 2),
+            PathBuf::from("/v/HyperGSR_2026-10-25_12-31-38.part2.capture.mp4")
+        );
+    }
+
+    #[test]
+    fn part_telemetry_follows_the_joined_timeline() {
+        let parts = vec![
+            // Audio started 0.2 s before the first frame; frozen after 64.9 s.
+            (PartSpan { video_start: 0.2, kept: 65.1 }, vec![event(0.0), event(64.0), event(70.0)]),
+            (PartSpan { video_start: 0.1, kept: 10.0 }, vec![event(0.0), event(5.0)]),
+        ];
+        let times: Vec<f32> = merge_part_events(&parts).iter().map(|e| e.timestamp_sec).collect();
+        let expected = [0.0, 64.0, 65.0, 70.0];
+        assert_eq!(times.len(), expected.len());
+        for (t, want) in times.iter().zip(expected) {
+            assert!((t - want).abs() < 1e-3, "{times:?}");
+        }
+    }
 
     #[test]
     fn capture_files_map_to_their_final_name() {

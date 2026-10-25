@@ -142,6 +142,11 @@ fn main() -> anyhow::Result<()> {
                 let _ = state.lock().stop_recording();
                 anyhow::bail!("Recording failed: {reason}");
             }
+            if let Some(reason) = g.capture_paused.clone() {
+                drop(g);
+                eprintln!("⚠ Screen sharing was interrupted ({reason}); saving what was recorded");
+                break;
+            }
             let elapsed = g.recording_start.map(|t| t.elapsed().as_secs_f32());
             drop(g);
             if elapsed.is_some_and(|e| e >= secs) {

@@ -350,6 +350,45 @@ fn parse_probe(text: &str) -> Result<VideoInfo> {
     })
 }
 
+/// A capture file to join, and the file time it is worth keeping up to.
+pub struct Segment {
+    pub path: PathBuf,
+    pub end_sec: Option<f64>,
+}
+
+fn concat_list(segments: &[Segment]) -> String {
+    let mut list = String::from("ffconcat version 1.0\n");
+    for seg in segments {
+        let path = seg.path.display().to_string().replace('\'', "'\\''");
+        list.push_str(&format!("file '{path}'\n"));
+        if let Some(end) = seg.end_sec {
+            list.push_str(&format!("outpoint {end:.6}\n"));
+        }
+    }
+    list
+}
+
+/// Joins captures made with the same settings into one MP4 without
+/// re-encoding. Each segment starts where the previous one's kept part ends.
+pub fn concat_segments(segments: &[Segment], output: &Path) -> Result<()> {
+    let list_path = output.with_extension("concat.txt");
+    std::fs::write(&list_path, concat_list(segments)).context("cannot write the segment list")?;
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list_path)
+        .args(["-map", "0", "-c", "copy", "-f", "mp4"])
+        .arg(output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .context("cannot run ffmpeg");
+    let _ = std::fs::remove_file(&list_path);
+    if !status?.success() {
+        bail!("ffmpeg could not join the recording's parts");
+    }
+    Ok(())
+}
+
 /// Copies the streams into a web-friendly MP4 without re-encoding.
 pub fn remux_to_mp4(input: &Path, output: &Path) -> Result<()> {
     let status = Command::new("ffmpeg")
@@ -378,6 +417,18 @@ mod tests {
         assert_eq!((info.width, info.height), (2560, 1600));
         assert!((info.duration_sec - 65.85).abs() < 1e-6);
         assert!(info.has_audio);
+    }
+
+    #[test]
+    fn concat_list_quotes_paths_and_trims_segments() {
+        let list = concat_list(&[
+            Segment { path: PathBuf::from("/v/it's.part1.mp4"), end_sec: Some(64.9) },
+            Segment { path: PathBuf::from("/v/b.mp4"), end_sec: None },
+        ]);
+        assert_eq!(
+            list,
+            "ffconcat version 1.0\nfile '/v/it'\\''s.part1.mp4'\noutpoint 64.900000\nfile '/v/b.mp4'\n"
+        );
     }
 
     #[test]
