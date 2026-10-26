@@ -220,7 +220,7 @@ fn render_image(path: &std::path::Path, w: usize, h: usize, out: &mut [u8]) -> R
     let cropped = image::imageops::crop_imm(&img, cx, cy, crop_w, crop_h).to_image();
     let resized =
         image::imageops::resize(&cropped, w as u32, h as u32, image::imageops::FilterType::CatmullRom);
-    for (dst, src) in out.chunks_exact_mut(4).zip(resized.pixels()) {
+    for (dst, src) in out.as_chunks_mut::<4>().0.iter_mut().zip(resized.pixels()) {
         dst[..3].copy_from_slice(&src.0);
         dst[3] = 255;
     }

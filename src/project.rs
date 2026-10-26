@@ -118,7 +118,7 @@ fn prune(root: &Path, keep: usize, max_bytes: u64) {
             (time, size, path)
         })
         .collect();
-    projects.sort_by(|a, b| b.0.cmp(&a.0));
+    projects.sort_by_key(|p| std::cmp::Reverse(p.0));
     let mut used = 0u64;
     for (i, (_, size, path)) in projects.iter().enumerate() {
         used += size;

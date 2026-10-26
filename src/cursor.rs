@@ -514,7 +514,7 @@ impl EvdevButtons {
             match file.read(&mut buf) {
                 Ok(0) => return false,
                 Ok(n) => {
-                    for ev in buf[..n - n % EVENT].chunks_exact(EVENT) {
+                    for ev in buf[..n].as_chunks::<EVENT>().0 {
                         let kind = u16::from_ne_bytes([ev[16], ev[17]]);
                         let code = u16::from_ne_bytes([ev[18], ev[19]]);
                         let value = i32::from_ne_bytes([ev[20], ev[21], ev[22], ev[23]]);
