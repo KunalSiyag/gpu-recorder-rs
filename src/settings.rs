@@ -38,6 +38,62 @@ pub enum Quality {
     High,
 }
 
+/// Shape of an exported video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Aspect {
+    /// The recording's own shape.
+    #[default]
+    Original,
+    Wide,
+    Vertical,
+    Square,
+}
+
+impl Aspect {
+    /// Width to height, or `None` for the recording's own shape.
+    pub fn ratio(self) -> Option<(usize, usize)> {
+        match self {
+            Aspect::Original => None,
+            Aspect::Wide => Some((16, 9)),
+            Aspect::Vertical => Some((9, 16)),
+            Aspect::Square => Some((1, 1)),
+        }
+    }
+
+    /// Output size for a `src`-sized recording: vertical and square videos
+    /// keep the recording's short side, wide ones its long side. Sizes are
+    /// even and within what hardware encoders accept.
+    pub fn output_size(self, src: (usize, usize)) -> (usize, usize) {
+        let Some((a, b)) = self.ratio() else { return src };
+        let (short, long) = (src.0.min(src.1), src.0.max(src.1));
+        let (w, h) = if a > b { (long, long * b / a) } else { (short, short * b / a) };
+        let fit = (4096.0 / w.max(h) as f64).min(1.0);
+        let even = |v: usize| (((v as f64 * fit) / 2.0).round() as usize * 2).max(16);
+        (even(w), even(h))
+    }
+}
+
+/// Container and codec of an exported video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ExportFormat {
+    #[default]
+    Mp4,
+    /// VP9 and Opus, for the web.
+    WebM,
+    /// Silent, 15 frames per second, at most 960 pixels wide.
+    Gif,
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Mp4 => "mp4",
+            ExportFormat::WebM => "webm",
+            ExportFormat::Gif => "gif",
+        }
+    }
+}
+
 /// Normalized rectangle (0..1) of the captured monitor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Region {
@@ -233,6 +289,18 @@ mod tests {
         let r = Region { x: 0.25, y: 0.5, w: 0.5, h: 0.25 };
         assert_eq!(r.map_point(0.5, 0.625), (0.5, 0.5));
         assert_eq!(r.map_point(0.0, 1.0), (0.0, 1.0));
+    }
+
+    #[test]
+    fn export_shapes_keep_the_recordings_resolution() {
+        assert_eq!(Aspect::Original.output_size((1366, 768)), (1366, 768));
+        assert_eq!(Aspect::Vertical.output_size((1920, 1080)), (1080, 1920));
+        assert_eq!(Aspect::Square.output_size((1920, 1080)), (1080, 1080));
+        assert_eq!(Aspect::Wide.output_size((1920, 1080)), (1920, 1080));
+        assert_eq!(Aspect::Wide.output_size((800, 1200)), (1200, 676));
+        // 4K-wide screens stay within the H.264 hardware limit.
+        let (w, h) = Aspect::Vertical.output_size((5120, 2880));
+        assert!(w <= 4096 && h <= 4096 && w % 2 == 0 && h % 2 == 0, "{w}x{h}");
     }
 
     #[test]

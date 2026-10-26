@@ -171,12 +171,36 @@ fn main() -> anyhow::Result<()> {
         let (Some(capture), Some(telemetry), Some(output)) =
             (args.get(idx + 1), args.get(idx + 2), args.get(idx + 3))
         else {
-            anyhow::bail!("usage: --render-capture <capture.mp4> <telemetry.json> <out.mp4> [<capture.cursor>]");
+            anyhow::bail!(
+                "usage: --render-capture <capture.mp4> <telemetry.json> <out> [<capture.cursor>] \
+                 [--aspect wide|vertical|square] [--format mp4|webm|gif] [--cut <from>:<to>]..."
+            );
         };
         let cursor = args
             .get(idx + 4)
+            .filter(|p| !p.starts_with("--"))
             .map(|p| cursor_track::CursorTrack::load(std::path::Path::new(p)))
             .transpose()?;
+        let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+        let aspect = match option("--aspect").map(String::as_str) {
+            Some("wide") => settings::Aspect::Wide,
+            Some("vertical") => settings::Aspect::Vertical,
+            Some("square") => settings::Aspect::Square,
+            _ => settings::Aspect::Original,
+        };
+        let format = match option("--format").map(String::as_str) {
+            Some("webm") => settings::ExportFormat::WebM,
+            Some("gif") => settings::ExportFormat::Gif,
+            _ => settings::ExportFormat::Mp4,
+        };
+        let cuts: Vec<(f64, f64)> = args
+            .windows(2)
+            .filter(|w| w[0] == "--cut")
+            .filter_map(|w| {
+                let (a, b) = w[1].split_once(':')?;
+                Some((a.parse().ok()?, if b.is_empty() { f64::INFINITY } else { b.parse().ok()? }))
+            })
+            .collect();
         let events: Vec<encoder::RecordedZoomEvent> =
             serde_json::from_str(&std::fs::read_to_string(telemetry)?)?;
         let settings = state.lock().settings.clone();
@@ -192,6 +216,9 @@ fn main() -> anyhow::Result<()> {
             cursor,
             cursor_scale: settings.cursor_scale,
             click_ripples: settings.click_ripples,
+            cuts,
+            aspect,
+            format,
         };
         let started = std::time::Instant::now();
         let saved = studio_render::render(&job, &std::sync::atomic::AtomicU32::new(0))?;
