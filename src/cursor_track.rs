@@ -113,6 +113,14 @@ impl CursorTrack {
         self.samples.iter().any(|s| s.shape != 0)
     }
 
+    /// Hotspot position at video time `t`, or `None` while the cursor is
+    /// hidden or off the recorded stream.
+    pub fn position_at(&self, t: f64) -> Option<(f32, f32)> {
+        let i = self.samples.partition_point(|s| s.t <= t).checked_sub(1)?;
+        let s = self.samples[i];
+        (s.shape != 0).then_some((s.x, s.y))
+    }
+
     /// Appends `other`, moved by `shift` seconds and cut after `last`
     /// seconds of its own time (the joined video's timeline).
     pub fn append_shifted(&mut self, other: CursorTrack, shift: f64, last: f64) {
@@ -314,6 +322,65 @@ pub fn draw_nv12(frame: &mut [u8], w: usize, h: usize, place: Placement, shape: 
     }
 }
 
+/// How long a click ripple lasts, in seconds.
+pub const RIPPLE_SEC: f64 = 0.45;
+
+/// Draws a click ripple centred on capture pixel `(x, y)`, `progress`
+/// (0..1) through its animation: an indigo ring that grows and fades over
+/// a soft disc, sized with the zoom.
+pub fn draw_ripple_nv12(frame: &mut [u8], w: usize, h: usize, place: Placement, (x, y): (f32, f32), progress: f32) {
+    // Indigo (99, 102, 241) in limited-range BT.601.
+    const COLOR: (f32, f32, f32) = (106.6, 199.4, 132.2);
+    let (rx, ry, rw, rh) = place.rect;
+    let (vx, vy, vw, _) = place.view;
+    let k = rw as f32 / vw.max(1.0);
+    let p = progress.clamp(0.0, 1.0);
+    let ease = 1.0 - (1.0 - p).powi(3);
+    let radius = (8.0 + 22.0 * ease) * k;
+    let half_ring = 1.6 * k.max(1.0);
+    let ring_alpha = 0.9 * (1.0 - p).powi(2);
+    let disc_alpha = 0.22 * (1.0 - p);
+    let cx = rx as f32 + (x - vx) * k;
+    let cy = ry as f32 + (y - vy) * k;
+    let reach = radius + half_ring + 1.0;
+    let x0 = ((cx - reach).floor().max(rx as f32) as usize) & !1;
+    let y0 = ((cy - reach).floor().max(ry as f32) as usize) & !1;
+    let x1 = (((cx + reach).ceil().min((rx + rw) as f32).max(0.0) as usize) + 1).min(w) & !1;
+    let y1 = (((cy + reach).ceil().min((ry + rh) as f32).max(0.0) as usize) + 1).min(h) & !1;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let alpha = |px: usize, py: usize| -> f32 {
+        if px < rx || px >= rx + rw || py < ry || py >= ry + rh {
+            return 0.0;
+        }
+        let d = ((px as f32 + 0.5 - cx).powi(2) + (py as f32 + 0.5 - cy).powi(2)).sqrt();
+        let ring = (half_ring - (d - radius).abs() + 0.5).clamp(0.0, 1.0);
+        let disc = (radius - d + 0.5).clamp(0.0, 1.0);
+        (ring * ring_alpha + disc * disc_alpha).min(1.0)
+    };
+    let (luma, chroma) = frame.split_at_mut(w * h);
+    for by in (y0..y1).step_by(2) {
+        for bx in (x0..x1).step_by(2) {
+            let mut sum = 0.0;
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let a = alpha(bx + dx, by + dy);
+                if a > 0.0 {
+                    let l = &mut luma[(by + dy) * w + bx + dx];
+                    *l = (*l as f32 + (COLOR.0 - *l as f32) * a).round() as u8;
+                    sum += a;
+                }
+            }
+            if sum > 0.0 {
+                let a = sum / 4.0;
+                let o = (by / 2) * w + (bx / 2) * 2;
+                chroma[o] = (chroma[o] as f32 + (COLOR.1 - chroma[o] as f32) * a).round() as u8;
+                chroma[o + 1] = (chroma[o + 1] as f32 + (COLOR.2 - chroma[o + 1] as f32) * a).round() as u8;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +452,25 @@ mod tests {
         assert_eq!(tail[0].shape, 0);
         assert_eq!(tail[1].shape, 2);
         assert!(tail.iter().all(|s| s.t <= 12.0));
+    }
+
+    #[test]
+    fn ripples_tint_their_ring_and_stay_inside_the_content() {
+        let (w, h) = (64, 64);
+        let mut frame = vec![200u8; w * h];
+        frame.extend(std::iter::repeat_n(128u8, w * h / 2));
+        let place = Placement { rect: (0, 0, 40, 64), view: (0.0, 0.0, 40.0, 64.0) };
+        draw_ripple_nv12(&mut frame, w, h, place, (20.0, 32.0), 0.0);
+        // On the ring (radius 8), toward indigo's darker luma.
+        assert!(frame[32 * w + 28] < 140, "{}", frame[32 * w + 28]);
+        assert_eq!(frame[2 * w + 2], 200);
+        // A ripple at the edge is clipped to the content rectangle.
+        draw_ripple_nv12(&mut frame, w, h, place, (39.0, 32.0), 0.0);
+        assert_eq!(frame[32 * w + 41], 200);
+        // A finished ripple draws nothing.
+        let before = frame.clone();
+        draw_ripple_nv12(&mut frame, w, h, place, (20.0, 10.0), 1.0);
+        assert_eq!(frame, before);
     }
 
     #[test]

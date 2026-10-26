@@ -56,6 +56,7 @@ pub fn warm_up() {
     std::thread::spawn(|| {
         capabilities();
         crate::encoder::ActiveEncoderSession::warm_up();
+        crate::encoder::portal_cursor_metadata();
     });
 }
 

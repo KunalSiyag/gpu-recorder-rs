@@ -435,6 +435,112 @@ impl Drop for DrmCursorReader {
     }
 }
 
+/// Mouse buttons read from evdev pointer devices, for click detection on
+/// native Wayland, where nothing else reports them. Works only when the
+/// user may read `/dev/input` (the `input` group). Devices with letter keys
+/// are never opened, so keystrokes are never read.
+struct EvdevButtons {
+    devices: Vec<(std::path::PathBuf, std::fs::File)>,
+    last_scan: Option<std::time::Instant>,
+    /// Left, right, middle, side.
+    down: [bool; 4],
+}
+
+impl EvdevButtons {
+    const EV_KEY: u16 = 1;
+    const BTN_LEFT: u16 = 0x110;
+    const KEY_Q: usize = 16;
+    const KEY_M: usize = 50;
+    /// How often to look for newly connected mice.
+    const RESCAN: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn new() -> Self {
+        let mut buttons = Self { devices: Vec::new(), last_scan: None, down: [false; 4] };
+        buttons.scan();
+        buttons
+    }
+
+    /// Whether the device reports mouse buttons and has no letter keys.
+    fn is_pointer(file: &std::fs::File) -> bool {
+        use std::os::fd::AsRawFd;
+        // EVIOCGBIT(EV_KEY, 96): the device's key and button bitmap.
+        const LEN: usize = 96;
+        let request = (2u64 << 30) | ((LEN as u64) << 16) | ((b'E' as u64) << 8) | (0x20 + Self::EV_KEY as u64);
+        let mut bits = [0u8; LEN];
+        let got = unsafe { libc::ioctl(file.as_raw_fd(), request as _, bits.as_mut_ptr()) };
+        if got <= 0 {
+            return false;
+        }
+        let has = |code: usize| bits.get(code / 8).is_some_and(|b| b & (1 << (code % 8)) != 0);
+        has(Self::BTN_LEFT as usize) && !(Self::KEY_Q..=Self::KEY_M).any(has)
+    }
+
+    fn scan(&mut self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.last_scan = Some(std::time::Instant::now());
+        let Ok(dir) = std::fs::read_dir("/dev/input") else { return };
+        for entry in dir.flatten() {
+            let path = entry.path();
+            let is_event = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event"));
+            if !is_event || self.devices.iter().any(|(p, _)| *p == path) {
+                continue;
+            }
+            let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)
+            else {
+                continue;
+            };
+            if Self::is_pointer(&file) {
+                self.devices.push((path, file));
+            }
+        }
+    }
+
+    /// Applies pending events and returns which buttons are down, counting
+    /// a press released before this poll as down once so no click is lost.
+    fn poll(&mut self) -> [bool; 4] {
+        use std::io::Read;
+        if self.last_scan.is_none_or(|t| t.elapsed() > Self::RESCAN) {
+            self.scan();
+        }
+        // struct input_event on 64-bit Linux: timeval, type, code, value.
+        const EVENT: usize = 24;
+        let mut buf = [0u8; EVENT * 64];
+        let down = &mut self.down;
+        let mut pressed = [false; 4];
+        self.devices.retain_mut(|(_, file)| loop {
+            match file.read(&mut buf) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    for ev in buf[..n - n % EVENT].chunks_exact(EVENT) {
+                        let kind = u16::from_ne_bytes([ev[16], ev[17]]);
+                        let code = u16::from_ne_bytes([ev[18], ev[19]]);
+                        let value = i32::from_ne_bytes([ev[20], ev[21], ev[22], ev[23]]);
+                        let slot = match code.wrapping_sub(Self::BTN_LEFT) {
+                            0 => 0,
+                            1 => 1,
+                            2 => 2,
+                            3 | 4 => 3,
+                            _ => continue,
+                        };
+                        if kind == Self::EV_KEY && value != 2 {
+                            down[slot] = value != 0;
+                            pressed[slot] |= value != 0;
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return true,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                // The device was unplugged.
+                Err(_) => return false,
+            }
+        });
+        std::array::from_fn(|i| self.down[i] || pressed[i])
+    }
+}
+
 pub struct CursorTracker {
     samples: [CursorSample; CURSOR_HISTORY_CAP],
     head: usize,
@@ -456,6 +562,7 @@ pub struct CursorTracker {
     last_motion_ms: u64,
     drm_cursor: Option<DrmCursorReader>,
     x11_conn: Option<X11CursorConn>,
+    buttons: parking_lot::Mutex<EvdevButtons>,
 }
 
 struct X11CursorConn {
@@ -600,6 +707,7 @@ impl CursorTracker {
             last_motion_ms: 0,
             drm_cursor,
             x11_conn,
+            buttons: parking_lot::Mutex::new(EvdevButtons::new()),
         }
     }
 
@@ -607,12 +715,28 @@ impl CursorTracker {
     /// native Wayland and XWayland windows on COSMIC in <10 µs without blocking), falling back
     /// to X11 only on pure Xorg sessions.
     pub fn poll_system_input(&self) -> Option<(f32, f32, SystemInputState)> {
+        let [left, right, middle, side] = self.buttons.lock().poll();
+        let with_buttons = |mut state: SystemInputState| {
+            state.left_down |= left;
+            state.right_down |= right;
+            state.middle_down |= middle;
+            state.side_down |= side;
+            state
+        };
         if let Some(ref drm) = self.drm_cursor {
             if let Some((nx, ny, _shape_changed)) = drm.query_cursor() {
-                return Some((nx, ny, SystemInputState::default()));
+                return Some((nx, ny, with_buttons(SystemInputState::default())));
             }
         }
-        self.x11_conn.as_ref().and_then(|x| x.query_pointer_and_keys())
+        self.x11_conn
+            .as_ref()
+            .and_then(|x| x.query_pointer_and_keys())
+            .map(|(x, y, state)| (x, y, with_buttons(state)))
+    }
+
+    /// Whether mouse clicks are detected on native Wayland windows too.
+    pub fn reads_mouse_buttons(&self) -> bool {
+        !self.buttons.lock().devices.is_empty()
     }
 
     /// Whether a real pointer source (DRM cursor plane or X11) was opened.

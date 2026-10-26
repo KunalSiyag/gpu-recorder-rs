@@ -50,6 +50,7 @@ It runs on native Wayland (COSMIC, GNOME, KDE Plasma, Hyprland, Sway) and on X11
 - **Lets you take over.** Bind your own zoom trigger (keys, mouse buttons, shake, double-click), lock the zoom, or dial depth from 1.0× to 3.2× with the scroll wheel.
 - **Records a screen, a window, or an area.** Pick the source in the Studio drawer; drag out an area on a full-screen overlay to record just that rectangle.
 - **Draws a smooth cursor.** Where the portal can send the cursor separately (COSMIC, GNOME, KDE), the video is captured without it and the cursor is drawn back after you stop, on a path smoothed without lag and at **Normal** or **Large** size. Elsewhere the desktop draws it into the video as usual.
+- **Shows your clicks.** Each click leaves an indigo ripple under the cursor in the saved video (**Clicks** in the Record tab). Wayland reports clicks to no one but the focused app, so on native Wayland windows HyperGSR reads mouse buttons from `/dev/input`, which needs the `input` group (`sudo usermod -aG input $USER`, then log in again). Only devices with mouse buttons and no letter keys are opened, so keystrokes are never read. Clicks also trigger auto-zoom.
 - **Records sound.** Desktop audio, the microphone, or both mixed, captured on the same clock as the video.
 - **Frames it for presenting.** Place the recording on a gradient or your own image, with padding, rounded corners and a soft shadow. Auto-zoom and the background are applied in one GPU-assisted pass after you stop.
 - **Never loses a take.** Video time comes from the wall clock, so a recording lasts exactly as long as you recorded, even on a still screen. Captures are written as fragmented MP4, so a crash keeps everything up to the last second, and if the capture stops on its own the island says why and saves what it has.
@@ -343,8 +344,11 @@ the Studio drawer (and the cursor size) are remembered in
 | `HYPERGSR_NATIVE_CURSOR=1` | Let the desktop draw the cursor into the video instead of the smoothed studio cursor |
 
 With several displays, auto-zoom follows the cursor only while it is on the
-recorded one and holds the wide view while it is elsewhere. Displays are told
-apart by resolution, so two identical screens are treated as one.
+recorded one and holds the wide view while it is elsewhere. With the studio
+cursor, the portal says exactly when the cursor is over the recording, which
+also lets a single window be zoomed. Otherwise displays are told apart by
+resolution, so two identical screens are treated as one, and window recordings
+are not zoomed.
 
 If a recording fails, the reason is shown in the island, and the capture
 helper's and FFmpeg's messages are in `~/.cache/hypergsr/capture.log`.

@@ -91,6 +91,10 @@ fn update(state: &SharedStudioState, change: impl FnOnce(&mut RecorderSettings))
 fn source_hint(settings: &RecorderSettings) -> String {
     match (settings.source, settings.region) {
         (CaptureSource::Screen, _) => "Records a whole screen".to_string(),
+        // Window zoom follows the window's own cursor track.
+        (CaptureSource::Window, _) if settings.show_cursor && crate::encoder::portal_cursor_metadata() => {
+            "Records one window".to_string()
+        }
         (CaptureSource::Window, _) => "Records one window (auto-zoom off)".to_string(),
         (CaptureSource::Region, Some(r)) => format!(
             "Area {:.0}% × {:.0}% at ({:.0}%, {:.0}%)",
@@ -129,7 +133,7 @@ fn set_active_swatch(buttons: &[Button], active: Option<usize>) {
 }
 
 /// `~/…` for folders under home, so the row stays short.
-fn display_dir(dir: &std::path::Path) -> String {
+pub fn display_dir(dir: &std::path::Path) -> String {
     let home = crate::bundled::home_dir();
     match dir.strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
@@ -363,6 +367,36 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
          back on a smoothed path, so it glides instead of jittering",
     ));
     cursor_row.append(&cursor_track);
+    let ripple_label = |on: bool| if on { "● Clicks" } else { "○ Clicks" };
+    let ripple_btn = Button::with_label(ripple_label(settings.click_ripples));
+    ripple_btn.add_css_class(if settings.click_ripples { "toggle-chip-on" } else { "toggle-chip" });
+    let clicks_seen = state.lock().cursor_tracker.reads_mouse_buttons();
+    ripple_btn.set_tooltip_text(Some(if clicks_seen {
+        "Shows a ripple where you click"
+    } else {
+        "Shows a ripple where you click. On Wayland, clicks are only seen when you may read \
+         /dev/input: add yourself to the input group (sudo usermod -aG input $USER) and log in again"
+    }));
+    {
+        let st = state.clone();
+        let footer = footer.clone();
+        ripple_btn.connect_clicked(move |btn| {
+            update(&st, |s| s.click_ripples = !s.click_ripples);
+            let (on, seen) = {
+                let g = st.lock();
+                (g.settings.click_ripples, g.cursor_tracker.reads_mouse_buttons())
+            };
+            set_btn_text(btn, ripple_label(on));
+            btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
+            btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
+            footer.set_text(match (on, seen) {
+                (false, _) => "○ No click ripples",
+                (true, true) => "✓ Clicks show a ripple",
+                (true, false) => "✓ Click ripples on; join the input group so Wayland clicks are seen",
+            });
+        });
+    }
+    cursor_row.append(&ripple_btn);
     rec_card.append(&cursor_row);
 
     // Start/stop from anywhere with a desktop keybinding.
