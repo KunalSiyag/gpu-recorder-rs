@@ -662,8 +662,8 @@ impl StopJob {
         let cursor = done.cursor.filter(|c| c.is_useful());
         // Live telemetry is screen-wide, so a window is only zoomed by its
         // own cursor track.
-        let auto_zoom =
-            self.auto_zoom && (self.settings.source != CaptureSource::Window || cursor.is_some());
+        let zoomable = self.settings.source != CaptureSource::Window || cursor.is_some();
+        let auto_zoom = self.auto_zoom && zoomable;
         let job = RenderJob {
             capture: capture.clone(),
             output: output.clone(),
@@ -688,7 +688,8 @@ impl StopJob {
         });
         match result {
             Ok(path) => {
-                let _ = std::fs::remove_file(&capture);
+                // The capture stays editable for a while; see `project`.
+                crate::project::keep(&job, zoomable);
                 Ok(path)
             }
             // The fragmented capture plays as is; hand it over under the final name.

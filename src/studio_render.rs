@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RenderJob {
     /// Raw capture written by the capture helper (fragmented MP4).
     pub capture: PathBuf,

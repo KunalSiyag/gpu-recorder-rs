@@ -51,7 +51,7 @@ fn caption(text: &str) -> Label {
 
 /// A segmented control; `on_pick` runs with the chosen index. A label of
 /// the form `"icon:Text"` gets that icon.
-fn segments(labels: &[&str], active: usize, on_pick: impl Fn(usize) + 'static) -> (GtkBox, Vec<Button>) {
+pub(crate) fn segments(labels: &[&str], active: usize, on_pick: impl Fn(usize) + 'static) -> (GtkBox, Vec<Button>) {
     let track = GtkBox::new(Orientation::Horizontal, 3);
     track.add_css_class("seg-track");
     let buttons: Vec<Button> = labels

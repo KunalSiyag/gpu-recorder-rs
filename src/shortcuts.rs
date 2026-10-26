@@ -75,6 +75,23 @@ pub fn activate_running_recorder(flag: &str) -> Result<()> {
     let Some(binding) = BINDINGS.iter().find(|b| b.flag == flag) else {
         bail!("unknown shortcut {flag}");
     };
+    if activate_in_running(binding.action, None)? {
+        return Ok(());
+    }
+    if binding.action != "toggle-record" {
+        return Ok(());
+    }
+    let exe = std::env::current_exe()?;
+    Command::new(exe)
+        .env("HYPERGSR_START_RECORDING", "1")
+        .spawn()
+        .context("cannot start HyperGSR")?;
+    Ok(())
+}
+
+/// Activates the running island's `action` over D-Bus. `Ok(false)` when no
+/// island is running.
+pub fn activate_in_running(action: &str, param: Option<glib::Variant>) -> Result<bool> {
     use gio::prelude::*;
     let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
         .context("cannot reach the D-Bus session bus")?;
@@ -93,32 +110,24 @@ pub fn activate_running_recorder(flag: &str) -> Result<()> {
         .ok()
         .and_then(|reply| reply.child_value(0).get::<bool>())
         .unwrap_or(false);
-    if running {
-        let params: Vec<glib::Variant> = Vec::new();
-        let platform = std::collections::HashMap::<String, glib::Variant>::new();
-        bus.call_sync(
-            Some(APP_ID),
-            APP_OBJECT_PATH,
-            "org.gtk.Actions",
-            "Activate",
-            Some(&(binding.action, params, platform).to_variant()),
-            None,
-            gio::DBusCallFlags::NONE,
-            5000,
-            gio::Cancellable::NONE,
-        )
-        .context("the running HyperGSR did not accept the shortcut")?;
-        return Ok(());
+    if !running {
+        return Ok(false);
     }
-    if binding.action != "toggle-record" {
-        return Ok(());
-    }
-    let exe = std::env::current_exe()?;
-    Command::new(exe)
-        .env("HYPERGSR_START_RECORDING", "1")
-        .spawn()
-        .context("cannot start HyperGSR")?;
-    Ok(())
+    let params: Vec<glib::Variant> = param.into_iter().collect();
+    let platform = std::collections::HashMap::<String, glib::Variant>::new();
+    bus.call_sync(
+        Some(APP_ID),
+        APP_OBJECT_PATH,
+        "org.gtk.Actions",
+        "Activate",
+        Some(&(action, params, platform).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        5000,
+        gio::Cancellable::NONE,
+    )
+    .with_context(|| format!("the running HyperGSR did not accept {action}"))?;
+    Ok(true)
 }
 
 fn desktop() -> String {
