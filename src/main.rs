@@ -3,6 +3,7 @@ pub mod bundled;
 pub mod capture;
 pub mod compositor;
 pub mod cursor;
+pub mod cursor_track;
 pub mod decompiled_gsr;
 pub mod encoder;
 pub mod ffmpeg;
@@ -164,13 +165,18 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Re-render a raw capture with saved cursor telemetry and the current
-    // background settings: --render-capture <capture.mp4> <telemetry.json> <out.mp4>
+    // background settings, optionally drawing a recorded cursor track:
+    // --render-capture <capture.mp4> <telemetry.json> <out.mp4> [<capture.cursor>]
     if let Some(idx) = args.iter().position(|a| a == "--render-capture") {
         let (Some(capture), Some(telemetry), Some(output)) =
             (args.get(idx + 1), args.get(idx + 2), args.get(idx + 3))
         else {
-            anyhow::bail!("usage: --render-capture <capture.mp4> <telemetry.json> <out.mp4>");
+            anyhow::bail!("usage: --render-capture <capture.mp4> <telemetry.json> <out.mp4> [<capture.cursor>]");
         };
+        let cursor = args
+            .get(idx + 4)
+            .map(|p| cursor_track::CursorTrack::load(std::path::Path::new(p)))
+            .transpose()?;
         let events: Vec<encoder::RecordedZoomEvent> =
             serde_json::from_str(&std::fs::read_to_string(telemetry)?)?;
         let settings = state.lock().settings.clone();
@@ -183,6 +189,8 @@ fn main() -> anyhow::Result<()> {
             background: settings.background.clone(),
             quality: settings.quality,
             fps: settings.fps,
+            cursor,
+            cursor_scale: settings.cursor_scale,
         };
         let started = std::time::Instant::now();
         let saved = studio_render::render(&job, &std::sync::atomic::AtomicU32::new(0))?;

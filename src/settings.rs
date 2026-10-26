@@ -127,6 +127,8 @@ pub struct RecorderSettings {
     pub fps: u32,
     pub quality: Quality,
     pub show_cursor: bool,
+    /// Size of the studio-drawn cursor (1.0 is the desktop's own size).
+    pub cursor_scale: f32,
     pub auto_zoom: bool,
     pub background: BackgroundSettings,
     /// Where recordings are saved; `None` means `~/Videos`.
@@ -142,6 +144,7 @@ impl Default for RecorderSettings {
             fps: 60,
             quality: Quality::High,
             show_cursor: true,
+            cursor_scale: 1.0,
             auto_zoom: true,
             background: BackgroundSettings::default(),
             save_dir: None,
@@ -178,6 +181,7 @@ impl RecorderSettings {
 
     fn sanitized(mut self) -> Self {
         self.fps = if self.fps <= 30 { 30 } else { 60 };
+        self.cursor_scale = if self.cursor_scale.is_finite() { self.cursor_scale.clamp(1.0, 2.0) } else { 1.0 };
         self.region = self.region.and_then(Region::normalized);
         // A folder that was removed or unmounted falls back to ~/Videos.
         self.save_dir = self.save_dir.filter(|d| d.is_absolute() && d.is_dir());

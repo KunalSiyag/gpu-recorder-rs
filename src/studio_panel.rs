@@ -27,6 +27,9 @@ button.swatch-active { border-color: #818cf8; }
 }
 "#;
 
+/// Size of the "Large" cursor relative to the desktop's.
+const CURSOR_LARGE: f32 = 1.6;
+
 fn load_css() {
     let provider = CssProvider::new();
     provider.load_from_data(PANEL_CSS);
@@ -327,6 +330,40 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     quality_row.append(&fps_track);
     quality_row.append(&q_track);
     rec_card.append(&quality_row);
+
+    // The cursor is drawn by the studio render when the portal sends it
+    // separately, which smooths its path and allows a larger size.
+    let cursor_row = GtkBox::new(Orientation::Horizontal, 6);
+    cursor_row.append(&crate::gui::icon("cursor", 14));
+    let cursor_idx = match (settings.show_cursor, settings.cursor_scale > 1.2) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+    };
+    let (cursor_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["Hidden", "Normal", "Large"], cursor_idx, move |i| {
+            update(&st, |s| {
+                s.show_cursor = i > 0;
+                s.cursor_scale = if i == 2 { CURSOR_LARGE } else { 1.0 };
+            });
+            let studio = crate::encoder::portal_cursor_metadata();
+            footer.set_text(match (i, studio) {
+                (0, _) => "○ The cursor is left out of recordings",
+                (_, false) => "Your desktop draws the cursor into the video, so it stays as is",
+                (1, true) => "✓ Smooth cursor at its normal size",
+                _ => "✓ Smooth cursor, drawn larger",
+            });
+        })
+    };
+    cursor_track.set_hexpand(true);
+    cursor_track.set_tooltip_text(Some(
+        "When your desktop supports it, the cursor is recorded separately and drawn \
+         back on a smoothed path, so it glides instead of jittering",
+    ));
+    cursor_row.append(&cursor_track);
+    rec_card.append(&cursor_row);
 
     // Start/stop from anywhere with a desktop keybinding.
     let shortcut_row = GtkBox::new(Orientation::Horizontal, 6);

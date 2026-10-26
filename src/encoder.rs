@@ -141,8 +141,39 @@ pub struct CaptureOptions {
     pub source: CaptureSource,
     pub region: Option<Region>,
     pub show_cursor: bool,
+    /// Record the cursor beside the video (see `cursor_track`) so the
+    /// studio render can draw it smoothed; needs [`portal_cursor_metadata`].
+    pub studio_cursor: bool,
     /// Ignore the remembered portal selection and show the picker again.
     pub repick: bool,
+}
+
+/// Whether the screen-cast portal can send the cursor as metadata instead
+/// of drawing it into the frames. Asked once per run.
+pub fn portal_cursor_metadata() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        use gio::prelude::*;
+        const METADATA: u32 = 4;
+        let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+            return false;
+        };
+        bus.call_sync(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            Some(&("org.freedesktop.portal.ScreenCast", "AvailableCursorModes").to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            3000,
+            gio::Cancellable::NONE,
+        )
+        .ok()
+        .and_then(|reply| reply.child_value(0).as_variant())
+        .and_then(|modes| modes.get::<u32>())
+        .is_some_and(|modes| modes & METADATA != 0)
+    })
 }
 
 /// Result of stopping a capture.
@@ -153,9 +184,11 @@ pub struct FinishedCapture {
     pub error: Option<String>,
     /// Video time after which the capture only repeats a frozen frame.
     pub keep_sec: Option<f64>,
+    /// The cursor, when it was recorded beside the video.
+    pub cursor: Option<crate::cursor_track::CursorTrack>,
 }
 
-const HELPER_PROTOCOL: &str = "4";
+const HELPER_PROTOCOL: &str = "5";
 /// The helper's exit code after it reported LOST.
 const EXIT_STREAM_LOST: i32 = 6;
 
@@ -170,6 +203,8 @@ pub struct ActiveEncoderSession {
     pub zoom_events: Vec<RecordedZoomEvent>,
     /// Set when the recorder itself ended a capture whose stream froze.
     interrupted: Option<(f64, String)>,
+    /// Where the helper writes the cursor, in studio-cursor mode.
+    cursor_track: Option<PathBuf>,
 }
 
 /// Applies one line of the helper's stdout protocol.
@@ -222,8 +257,17 @@ impl ActiveEncoderSession {
             .args([
                 "--sources",
                 if options.source == CaptureSource::Window { "window" } else { "monitor" },
-            ])
-            .args(["--cursor", if options.show_cursor { "embedded" } else { "hidden" }]);
+            ]);
+        let cursor_track = (options.show_cursor && options.studio_cursor)
+            .then(|| crate::cursor_track::track_path(&out_path));
+        match &cursor_track {
+            Some(track) => {
+                cmd.args(["--cursor", "metadata", "--cursor-track"]).arg(track);
+            }
+            None => {
+                cmd.args(["--cursor", if options.show_cursor { "embedded" } else { "hidden" }]);
+            }
+        }
         if options.repick {
             cmd.arg("--reset");
         }
@@ -264,6 +308,7 @@ impl ActiveEncoderSession {
             fps: options.fps,
             zoom_events: Vec::with_capacity(4096),
             interrupted: None,
+            cursor_track,
         })
     }
 
@@ -515,6 +560,7 @@ impl ActiveEncoderSession {
             fps,
             zoom_events: Vec::new(),
             interrupted: None,
+            cursor_track: None,
         })
     }
 
@@ -643,11 +689,19 @@ impl ActiveEncoderSession {
                 let _ = child.wait();
             }
         }
+        let cursor = self.cursor_track.and_then(|track| {
+            let loaded = crate::cursor_track::CursorTrack::load(&track);
+            let _ = std::fs::remove_file(&track);
+            loaded
+                .map_err(|err| eprintln!("[HyperGSR] cursor track unusable: {err:#}"))
+                .ok()
+        });
         FinishedCapture {
             path: self.output_path,
             zoom_events: self.zoom_events,
             error,
             keep_sec,
+            cursor,
         }
     }
 

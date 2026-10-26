@@ -6,6 +6,7 @@
 //! would change a pixel, the capture is only remuxed, which takes seconds.
 
 use crate::backgrounds::{corner_mask, render_canvas, ContentRect};
+use crate::cursor_track::{self, CursorTrack, Placement, PreparedShape};
 use crate::encoder::{build_smooth_60fps_camera_frames, RecordedZoomEvent};
 use crate::ffmpeg::{self, VideoEncoder};
 use crate::settings::{BackgroundSettings, Quality, Region};
@@ -30,6 +31,45 @@ pub struct RenderJob {
     pub background: BackgroundSettings,
     pub quality: Quality,
     pub fps: u32,
+    /// The cursor recorded beside a capture that has none drawn in; it is
+    /// drawn on a smoothed path, `cursor_scale` times its size.
+    pub cursor: Option<CursorTrack>,
+    pub cursor_scale: f32,
+}
+
+/// Cursor at each output frame, ready to draw.
+struct CursorFrames {
+    shapes: Vec<PreparedShape>,
+    /// Capture-pixel hotspot and 1-based shape per frame.
+    path: Vec<Option<(f32, f32, usize)>>,
+    scale: f32,
+}
+
+impl CursorFrames {
+    fn new(job: &RenderJob, info_w: usize, info_h: usize, frames: usize) -> Option<Self> {
+        let track = job.cursor.as_ref()?;
+        // The capture is cropped from the stream the way `Region::crop_filter`
+        // rounds it.
+        let crop = job.region.map_or((0.0, 0.0), |r| {
+            let (sw, sh) = track
+                .stream_size
+                .map_or((info_w as f32 / r.w, info_h as f32 / r.h), |(w, h)| (w as f32, h as f32));
+            ((sw * r.x).trunc(), (sh * r.y).trunc())
+        });
+        Some(Self {
+            shapes: track.shapes.iter().map(PreparedShape::new).collect(),
+            path: track.frames(job.fps, frames, crop),
+            scale: job.cursor_scale.clamp(1.0, 2.0),
+        })
+    }
+
+    fn draw(&self, index: u64, frame: &mut [u16], compositor: &Compositor, cam: Camera) {
+        let Some(&Some((x, y, shape))) = self.path.get(index as usize) else { return };
+        let Some(shape) = self.shapes.get(shape - 1) else { return };
+        let rect = compositor.luma.rect;
+        let place = Placement { rect: (rect.x, rect.y, rect.w, rect.h), view: compositor.view(cam) };
+        cursor_track::draw_nv12(as_bytes_mut(frame), compositor.w, compositor.h, place, shape, (x, y), self.scale);
+    }
 }
 
 /// Camera at one output frame: center (normalized) and zoom factor.
@@ -84,7 +124,7 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
     }
     let info = ffmpeg::probe_video(&job.capture)?;
     let track = camera_track(job, info.duration_sec);
-    if track.is_none() && !job.background.is_enabled() {
+    if track.is_none() && !job.background.is_enabled() && job.cursor.is_none() {
         ffmpeg::remux_to_mp4(&job.capture, &job.output)?;
         progress.store(1000, Ordering::Relaxed);
         return Ok(job.output.clone());
@@ -117,8 +157,10 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
     let expected = ((video_sec * job.fps as f64).round() as u64).max(1);
     // Container durations can exceed the video by a few frames (audio tail).
     let slack = (job.fps as u64 / 2).max(3);
+    let cursor = CursorFrames::new(job, w, h, expected as usize + slack as usize * 4);
     let frames = pool.install(|| {
-        run_pipeline(job, &encoder, &compositor, track.as_deref(), &tmp, expected, info.video_start_sec, progress)
+        let effects = Effects { compositor: &compositor, camera: track.as_deref(), cursor: cursor.as_ref() };
+        run_pipeline(job, &encoder, effects, &tmp, expected, info.video_start_sec, progress)
     });
 
     match frames {
@@ -150,16 +192,23 @@ fn lower_priority(cmd: &mut Command) -> &mut Command {
     }
 }
 
+/// What the render pass applies to each frame.
+struct Effects<'a> {
+    compositor: &'a Compositor,
+    camera: Option<&'a [Camera]>,
+    cursor: Option<&'a CursorFrames>,
+}
+
 fn run_pipeline(
     job: &RenderJob,
     encoder: &VideoEncoder,
-    compositor: &Compositor,
-    track: Option<&[Camera]>,
+    effects: Effects<'_>,
     tmp: &Path,
     expected: u64,
     video_start_sec: f64,
     progress: &AtomicU32,
 ) -> Result<(u64, bool)> {
+    let compositor = effects.compositor;
     let (w, h) = (compositor.w, compositor.h);
     // Decode on the GPU when one is encoding anyway; FFmpeg falls back to
     // software decoding by itself if the hardware decoder is unavailable.
@@ -235,10 +284,14 @@ fn run_pipeline(
         while let Ok(input) = full_in_rx.recv() {
             let Ok(mut output) = free_out_rx.recv() else { break };
             let t = index as f64 / job.fps as f64;
-            let cam = track
+            let cam = effects
+                .camera
                 .map(|tr| tr[((t * 60.0).round() as usize).min(tr.len() - 1)])
                 .unwrap_or((0.5, 0.5, 1.0));
             compositor.compose(&input, &mut output, cam);
+            if let Some(cursor) = effects.cursor {
+                cursor.draw(index, &mut output, compositor, cam);
+            }
             let _ = free_in_tx.send(input);
             if full_out_tx.send(output).is_err() {
                 break;
@@ -526,18 +579,24 @@ impl Compositor {
         }
     }
 
-    /// Writes one NV12 output frame for the camera `(center_x, center_y, zoom)`.
-    pub fn compose(&self, src: &[u16], dst: &mut [u16], (cx, cy, zoom): Camera) {
-        let (w, h) = (self.w, self.h);
+    /// Part of the capture `(x0, y0, w, h)` the camera shows.
+    fn view(&self, (cx, cy, zoom): Camera) -> (f32, f32, f32, f32) {
+        let (w, h) = (self.w as f32, self.h as f32);
         let zoom = zoom.clamp(1.0, 4.0);
-        if zoom <= 1.001 && self.luma.rect == ContentRect::full(w, h) {
+        let (view_w, view_h) = (w / zoom, h / zoom);
+        let x0 = (cx * w - view_w * 0.5).clamp(0.0, w - view_w);
+        let y0 = (cy * h - view_h * 0.5).clamp(0.0, h - view_h);
+        (x0, y0, view_w, view_h)
+    }
+
+    /// Writes one NV12 output frame for the camera `(center_x, center_y, zoom)`.
+    pub fn compose(&self, src: &[u16], dst: &mut [u16], cam: Camera) {
+        let (w, h) = (self.w, self.h);
+        if cam.2 <= 1.001 && self.luma.rect == ContentRect::full(w, h) {
             dst.copy_from_slice(src);
             return;
         }
-        let view_w = w as f32 / zoom;
-        let view_h = h as f32 / zoom;
-        let x0 = (cx * w as f32 - view_w * 0.5).clamp(0.0, w as f32 - view_w);
-        let y0 = (cy * h as f32 - view_h * 0.5).clamp(0.0, h as f32 - view_h);
+        let (x0, y0, view_w, view_h) = self.view(cam);
 
         let split = w * h / 2;
         let (src_y, src_uv) = src.split_at(split);
@@ -639,6 +698,8 @@ mod tests {
             background: BackgroundSettings::default(),
             quality: Quality::High,
             fps: 60,
+            cursor: None,
+            cursor_scale: 1.0,
         }
     }
 

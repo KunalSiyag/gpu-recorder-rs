@@ -262,7 +262,8 @@ impl StudioState {
     /// Ends the current part when the stream stopped sending images while
     /// the cursor kept moving on the recorded monitor: the portal died
     /// without closing the stream. A still screen with a still cursor is
-    /// left alone. Only an embedded cursor redraws the screen when it moves.
+    /// left alone. A moving cursor shows up in the stream either way: drawn
+    /// into the image, or as cursor metadata the helper counts as activity.
     fn detect_frozen_capture(&mut self, now_ms: u64, off_capture: bool) {
         // The helper reports a stall after this long without a new image.
         const STALL_REPORT_MS: u64 = 3_000;
@@ -363,6 +364,8 @@ impl StudioState {
             source: settings.source,
             region: settings.active_region(),
             show_cursor: settings.show_cursor,
+            studio_cursor: crate::encoder::portal_cursor_metadata()
+                && std::env::var_os("HYPERGSR_NATIVE_CURSOR").is_none(),
             repick: self.repick_source,
         };
         let session = match ActiveEncoderSession::start_capture(&capture_path, &options) {
@@ -575,6 +578,8 @@ impl StopJob {
             background: self.settings.background.clone(),
             quality: self.settings.quality,
             fps: self.settings.fps,
+            cursor: done.cursor.filter(|c| c.is_useful()),
+            cursor_scale: self.settings.cursor_scale,
         };
         let result = studio_render::render(&job, progress).or_else(|err| {
             eprintln!("[HyperGSR] {err:#}; saving the recording without effects");
@@ -608,23 +613,33 @@ fn part_path(capture: &Path, n: usize) -> PathBuf {
 
 /// Where a part sits in the joined video: the file time its first frame
 /// has, and the file time it is kept up to.
+#[derive(Clone, Copy)]
 struct PartSpan {
     video_start: f64,
     kept: f64,
 }
 
-/// Moves each part's telemetry (timed from its own first frame) onto the
-/// joined video's timeline, which is timed from the first part's first frame.
-fn merge_part_events(parts: &[(PartSpan, Vec<RecordedZoomEvent>)]) -> Vec<RecordedZoomEvent> {
-    let Some(first) = parts.first() else {
-        return Vec::new();
-    };
-    let base = first.0.video_start;
+/// For each part, how far its telemetry (timed from its own first frame)
+/// moves on the joined video's timeline, which is timed from the first
+/// part's first frame, and the last of its own time that was kept.
+fn part_shifts(spans: &[PartSpan]) -> Vec<(f64, f64)> {
+    let base = spans.first().map_or(0.0, |s| s.video_start);
     let mut offset = 0.0f64;
+    spans
+        .iter()
+        .map(|span| {
+            let shift = offset + span.video_start - base;
+            offset += span.kept;
+            (shift, span.kept - span.video_start)
+        })
+        .collect()
+}
+
+/// Moves each part's telemetry onto the joined video's timeline.
+fn merge_part_events(parts: &[(PartSpan, Vec<RecordedZoomEvent>)]) -> Vec<RecordedZoomEvent> {
+    let spans: Vec<PartSpan> = parts.iter().map(|(s, _)| *s).collect();
     let mut merged = Vec::new();
-    for (span, events) in parts {
-        let shift = offset + span.video_start - base;
-        let last = span.kept - span.video_start;
+    for ((shift, last), (_, events)) in part_shifts(&spans).into_iter().zip(parts) {
         merged.extend(
             events
                 .iter()
@@ -634,7 +649,6 @@ fn merge_part_events(parts: &[(PartSpan, Vec<RecordedZoomEvent>)]) -> Vec<Record
                     ..*e
                 }),
         );
-        offset += span.kept;
     }
     merged
 }
@@ -691,6 +705,12 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
         }
         return Ok(first);
     }
+    let mut cursor: Option<crate::cursor_track::CursorTrack> = None;
+    for ((shift, last), part) in part_shifts(&spans).into_iter().zip(parts.iter_mut()) {
+        if let Some(track) = part.cursor.take() {
+            cursor.get_or_insert_with(Default::default).append_shifted(track, shift, last);
+        }
+    }
     let paired: Vec<_> = spans
         .into_iter()
         .zip(parts.iter().map(|p| p.zoom_events.clone()))
@@ -703,6 +723,7 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
         zoom_events: merge_part_events(&paired),
         error: last_error,
         keep_sec: None,
+        cursor,
     })
 }
 
