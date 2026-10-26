@@ -249,6 +249,19 @@ impl ActiveEncoderSession {
     /// the first captured frame; see [`Self::ready_at`].
     pub fn start_capture(output_path: impl AsRef<Path>, options: &CaptureOptions) -> Result<Self> {
         let out_path = output_path.as_ref().to_path_buf();
+        Self::start_into(&out_path, &crate::ffmpeg::CaptureTarget::File(&out_path), options)
+    }
+
+    /// Like [`Self::start_capture`], into a ring of segments in `dir` (see
+    /// `replay`). The cursor is drawn into the frames.
+    pub fn start_ring(dir: &Path, segment_sec: u32, count: u32, options: &CaptureOptions) -> Result<Self> {
+        let options = CaptureOptions { studio_cursor: false, ..options.clone() };
+        let target = crate::ffmpeg::CaptureTarget::Ring { dir, segment_sec, count };
+        Self::start_into(dir, &target, &options)
+    }
+
+    fn start_into(out_path: &Path, target: &crate::ffmpeg::CaptureTarget, options: &CaptureOptions) -> Result<Self> {
+        let out_path = out_path.to_path_buf();
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -268,7 +281,7 @@ impl ActiveEncoderSession {
                 "--sources",
                 if options.source == CaptureSource::Window { "window" } else { "monitor" },
             ]);
-        let cursor_track = (options.show_cursor && options.studio_cursor)
+        let cursor_track = (options.show_cursor && options.studio_cursor && matches!(target, crate::ffmpeg::CaptureTarget::File(_)))
             .then(|| crate::cursor_track::track_path(&out_path));
         match &cursor_track {
             Some(track) => {
@@ -288,7 +301,7 @@ impl ActiveEncoderSession {
             audio,
             options.clean_mic,
             options.region,
-            &out_path,
+            target,
         ));
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())

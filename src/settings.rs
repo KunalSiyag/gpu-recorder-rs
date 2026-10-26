@@ -211,6 +211,8 @@ pub struct RecorderSettings {
     pub webcam_size: f32,
     /// Hide the island while recording, so it is not in the video.
     pub hide_while_recording: bool,
+    /// Seconds an instant-replay clip keeps; 0 turns instant replay off.
+    pub replay_sec: u32,
 }
 
 impl Default for RecorderSettings {
@@ -232,6 +234,7 @@ impl Default for RecorderSettings {
             webcam: Webcam::Off,
             webcam_size: 0.24,
             hide_while_recording: false,
+            replay_sec: 0,
         }
     }
 }
@@ -266,6 +269,7 @@ impl RecorderSettings {
     fn sanitized(mut self) -> Self {
         self.fps = if self.fps <= 30 { 30 } else { 60 };
         self.countdown_sec = self.countdown_sec.min(10);
+        self.replay_sec = self.replay_sec.min(600);
         self.webcam_size = if self.webcam_size.is_finite() { self.webcam_size.clamp(0.1, 0.4) } else { 0.24 };
         self.cursor_scale = if self.cursor_scale.is_finite() { self.cursor_scale.clamp(1.0, 2.0) } else { 1.0 };
         self.region = self.region.and_then(Region::normalized);

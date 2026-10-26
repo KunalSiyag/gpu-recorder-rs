@@ -214,6 +214,15 @@ pub fn video_encoder_args(encoder: &VideoEncoder, quality: Quality, filters: &[S
 /// background noise (fans, hum, hiss), tracking it as it changes.
 pub const MIC_CLEANUP: &str = "highpass=f=80,afftdn=nr=12:nf=-50:tn=1";
 
+/// Where a capture is written.
+pub enum CaptureTarget<'a> {
+    /// One fragmented MP4.
+    File(&'a Path),
+    /// A ring of `count` MPEG-TS segments of about `segment_sec` each in
+    /// `dir`, the oldest overwritten first, timestamps continuous.
+    Ring { dir: &'a Path, segment_sec: u32, count: u32 },
+}
+
 pub fn capture_output_args(
     encoder: &VideoEncoder,
     quality: Quality,
@@ -221,7 +230,7 @@ pub fn capture_output_args(
     audio: AudioMode,
     clean_mic: bool,
     region: Option<Region>,
-    output: &Path,
+    target: &CaptureTarget,
 ) -> Vec<String> {
     let mut args = Vec::new();
     let mut audio_inputs = 0;
@@ -265,13 +274,22 @@ pub fn capture_output_args(
     // those stamps and shifting the file once keeps them in sync, where
     // FFmpeg would otherwise start each input at zero on its own.
     push(&mut args, &["-copyts", "-avoid_negative_ts", "make_zero"]);
-    // delay_moov keeps each track's real start, so audio that began before
-    // the first frame stays in sync instead of being pulled to zero.
-    push(
-        &mut args,
-        &["-movflags", "+frag_keyframe+empty_moov+default_base_moof+delay_moov", "-f", "mp4"],
-    );
-    args.push(output.display().to_string());
+    match target {
+        CaptureTarget::File(output) => {
+            // delay_moov keeps each track's real start, so audio that began
+            // before the first frame stays in sync instead of being pulled to zero.
+            push(
+                &mut args,
+                &["-movflags", "+frag_keyframe+empty_moov+default_base_moof+delay_moov", "-f", "mp4"],
+            );
+            args.push(output.display().to_string());
+        }
+        CaptureTarget::Ring { dir, segment_sec, count } => {
+            push(&mut args, &["-f", "segment", "-segment_format", "mpegts", "-reset_timestamps", "0"]);
+            push(&mut args, &["-segment_time", &segment_sec.to_string(), "-segment_wrap", &count.to_string()]);
+            args.push(dir.join("seg%03d.ts").display().to_string());
+        }
+    }
     args
 }
 
@@ -458,7 +476,7 @@ mod tests {
             AudioMode::Both,
             true,
             Some(region),
-            Path::new("/tmp/out.capture.mp4"),
+            &CaptureTarget::File(Path::new("/tmp/out.capture.mp4")),
         );
         let joined = args.join(" ");
         assert!(joined.contains("@DEFAULT_MONITOR@"));
@@ -467,9 +485,14 @@ mod tests {
         assert!(joined.contains("amix=inputs=2"));
         assert!(joined.contains("-shortest"));
         assert!(joined.contains("crop=w=trunc(iw*0.50000/2)*2"));
-        let mic = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Microphone, false, None, Path::new("o.mp4"));
+        let o = CaptureTarget::File(Path::new("o.mp4"));
+        let mic = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Microphone, false, None, &o);
         assert!(mic.join(" ").contains("-map 1:a:0 -af anull"));
-        let plain = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Off, true, None, Path::new("o.mp4"));
+        let plain = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Off, true, None, &o);
+        let ring = CaptureTarget::Ring { dir: Path::new("/r"), segment_sec: 2, count: 18 };
+        let ring = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Off, true, None, &ring).join(" ");
+        assert!(ring.ends_with("-segment_time 2 -segment_wrap 18 /r/seg%03d.ts"), "{ring}");
+        assert!(!ring.contains("movflags"));
         assert!(plain.join(" ").contains("crop=trunc(iw/2)*2:trunc(ih/2)*2"));
         assert!(!plain.join(" ").contains("-shortest"));
         assert_eq!(args.last().unwrap(), "/tmp/out.capture.mp4");

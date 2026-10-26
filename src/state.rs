@@ -87,6 +87,8 @@ pub struct StudioState {
     countdown_end: Option<Instant>,
     /// Records the webcam beside the screen.
     webcam: Option<crate::webcam::WebcamRecorder>,
+    /// The instant-replay buffer, while it runs.
+    replay: Option<crate::replay::ReplayBuffer>,
     /// Lazy-allocated buffers used ONLY when `--web` requests a rendered JPEG frame
     lazy_web_buffers: Option<(ScreenCapturer, FrameBuffer, FrameBuffer)>,
 }
@@ -141,6 +143,7 @@ impl StudioState {
             countdown_pending: 0,
             countdown_end: None,
             webcam: None,
+            replay: None,
             lazy_web_buffers: None,
         }
     }
@@ -418,7 +421,77 @@ impl StudioState {
         (x, y, Default::default())
     }
 
+    /// How the next capture records, from the current settings.
+    fn capture_options(&self) -> CaptureOptions {
+        let settings = &self.settings;
+        CaptureOptions {
+            fps: settings.fps,
+            quality: settings.quality,
+            audio: settings.audio,
+            source: settings.source,
+            region: settings.active_region(),
+            show_cursor: settings.show_cursor,
+            studio_cursor: crate::encoder::portal_cursor_metadata()
+                && std::env::var_os("HYPERGSR_NATIVE_CURSOR").is_none(),
+            repick: self.repick_source,
+            clean_mic: settings.clean_mic,
+        }
+    }
+
+    /// Starts the instant-replay buffer.
+    pub fn start_replay(&mut self) -> Result<()> {
+        if self.is_recording() || self.replay.is_some() {
+            anyhow::bail!("a capture is already running");
+        }
+        let keep = self.settings.replay_sec.max(5);
+        self.replay = Some(crate::replay::ReplayBuffer::start(&self.capture_options(), keep)?);
+        self.repick_source = false;
+        Ok(())
+    }
+
+    pub fn replay_active(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// Seconds buffered so far (up to what a clip keeps), once capturing.
+    pub fn replay_buffered_sec(&self) -> Option<f32> {
+        let replay = self.replay.as_ref()?;
+        let since = replay.session.ready_at()?.elapsed().as_secs_f32();
+        Some(since.min(replay.keep_sec as f32))
+    }
+
+    /// A clip of the last seconds, to save with [`crate::replay::ReplayClip::save`].
+    pub fn replay_clip(&self) -> Result<crate::replay::ReplayClip> {
+        let Some(replay) = self.replay.as_ref() else {
+            anyhow::bail!("instant replay is not running");
+        };
+        if replay.session.ready_at().is_none() {
+            anyhow::bail!("the screen share has not started yet");
+        }
+        replay.clip(&self.videos_dir)
+    }
+
+    /// Detaches the replay buffer; [`crate::replay::ReplayBuffer::stop`] it
+    /// off the UI thread.
+    pub fn take_replay(&mut self) -> Option<crate::replay::ReplayBuffer> {
+        self.replay.take()
+    }
+
+    /// Why the replay buffer's capture ended on its own, if it did.
+    pub fn poll_replay_failure(&mut self) -> Option<String> {
+        let exit = self.replay.as_mut()?.session.poll_exit()?;
+        if let Some(replay) = self.replay.take() {
+            std::thread::spawn(move || replay.stop());
+        }
+        Some(match exit {
+            CaptureExit::Interrupted(reason) | CaptureExit::Failed(reason) => reason,
+        })
+    }
+
     pub fn start_recording(&mut self) -> Result<PathBuf> {
+        if self.replay.is_some() {
+            anyhow::bail!("stop instant replay first");
+        }
         if self.is_recording() {
             self.stop_recording()?;
         }
@@ -435,19 +508,8 @@ impl StudioState {
                     && std::fs::OpenOptions::new().write(true).create_new(true).open(p).is_ok()
             })
             .expect("an unused file name");
+        let options = self.capture_options();
         let settings = &self.settings;
-        let options = CaptureOptions {
-            fps: settings.fps,
-            quality: settings.quality,
-            audio: settings.audio,
-            source: settings.source,
-            region: settings.active_region(),
-            show_cursor: settings.show_cursor,
-            studio_cursor: crate::encoder::portal_cursor_metadata()
-                && std::env::var_os("HYPERGSR_NATIVE_CURSOR").is_none(),
-            repick: self.repick_source,
-            clean_mic: settings.clean_mic,
-        };
         let session = match ActiveEncoderSession::start_capture(&capture_path, &options) {
             Ok(session) => session,
             Err(err) => {
