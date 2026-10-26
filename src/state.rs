@@ -586,6 +586,9 @@ impl StopJob {
                 && (self.settings.source != CaptureSource::Window || cursor.is_some()),
             cursor,
             cursor_scale: self.settings.cursor_scale,
+            cuts: Vec::new(),
+            aspect: Default::default(),
+            format: Default::default(),
         };
         let result = studio_render::render(&job, progress).or_else(|err| {
             eprintln!("[HyperGSR] {err:#}; saving the recording without effects");
