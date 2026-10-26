@@ -9,13 +9,24 @@
 // Usage:
 //   hypergsr-pw-capture --protocol
 //   hypergsr-pw-capture [--token FILE] [--fps N] [--sources monitor|window|both]
-//                       [--cursor embedded|hidden] [--reset] -- <ffmpeg output args>
+//                       [--cursor embedded|hidden|metadata] [--cursor-track FILE]
+//                       [--reset] -- <ffmpeg output args>
+//
+// With --cursor metadata the video has no cursor; its position and image go
+// to the --cursor-track file instead, one line per change:
+//   HGSR-CURSOR 1                       header
+//   S <id> <w> <h> <hot_x> <hot_y> <hex RGBA, straight alpha>   a new image
+//   P <ns> <x> <y> <id>                 hotspot at stream pixel (x, y) from
+//                                       CLOCK_MONOTONIC <ns>; id 0 is hidden
+//   T <ns> <w> <h>                      CLOCK_MONOTONIC time of video time zero,
+//                                       and the stream size
 //
 // stdout carries one line per event:
 //   READY <width> <height>   the first frame went to FFmpeg (video time zero)
-//   STALLED <sec>            no new image for a while; <sec> is the video time
-//                            of the last new image (a still screen also stalls)
-//   FLOWING                  new images arrive again after STALLED
+//   STALLED <sec>            no new image (or metadata cursor move) for a while;
+//                            <sec> is the video time of the last one (a still
+//                            screen also stalls)
+//   FLOWING                  updates arrive again after STALLED
 //   LOST <sec> <message>     the screen-cast stream went away mid-recording; the
 //                            file is finalized, and is worth keeping up to <sec>.
 //                            The exit code is EXIT_STREAM_LOST.
@@ -45,10 +56,11 @@
 #include <glib.h>
 
 #include <pipewire/pipewire.h>
+#include <spa/buffer/meta.h>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
 
-#define HELPER_PROTOCOL 4
+#define HELPER_PROTOCOL 5
 
 // libportal.so.1 ABI, declared here so only the shared library is needed.
 typedef struct _XdpPortal XdpPortal;
@@ -79,6 +91,7 @@ enum {
     XDP_OUTPUT_WINDOW = 2,
     XDP_CURSOR_MODE_HIDDEN = 1,
     XDP_CURSOR_MODE_EMBEDDED = 2,
+    XDP_CURSOR_MODE_METADATA = 4,
     XDP_PERSIST_MODE_PERSISTENT = 2,
 };
 
@@ -100,6 +113,10 @@ enum {
 // A stream that stays paused this long after it was streaming has lost its
 // source; renegotiation pauses it only briefly.
 #define PAUSED_LOST_NS 2000000000ULL
+// Largest cursor image kept from the stream's cursor metadata.
+#define CURSOR_MAX 256
+#define CURSOR_META_SIZE(w, h)                                                     \
+    (sizeof(struct spa_meta_cursor) + sizeof(struct spa_meta_bitmap) + (w) * (h) * 4)
 
 static volatile sig_atomic_t g_stop_requested = 0;
 static volatile sig_atomic_t g_stream_lost = 0;
@@ -163,6 +180,23 @@ typedef struct {
     pthread_cond_t frame_ready;
     bool has_first_frame;
     uint64_t frame_serial;
+
+    // Cursor track (metadata mode). Written by the PipeWire thread; the
+    // writer thread adds the time-zero line and closes it.
+    pthread_mutex_t track_lock;
+    FILE *track;
+    uint64_t track_flushed_ns;
+    uint32_t shape_id;
+    uint32_t shape_w, shape_h;
+    int32_t shape_hx, shape_hy;
+    uint8_t *shape;      // straight-alpha RGBA, shape_w * shape_h * 4
+    uint8_t *shape_tmp;  // conversion scratch, CURSOR_MAX^2 * 4
+    bool bitmap_hidden;
+    int32_t last_x, last_y;
+    uint32_t last_id;
+    // Counts cursor updates; with a metadata cursor they show the stream
+    // is alive while the image is still.
+    uint64_t cursor_updates;
 } CaptureApp;
 
 // Protocol lines come from the PipeWire and writer threads; one write(2)
@@ -395,6 +429,24 @@ static bool stop_signalled(struct pollfd *fds, int nfds) {
     return false;
 }
 
+static void track_time_zero(CaptureApp *app, uint64_t ns, uint32_t w, uint32_t h) {
+    pthread_mutex_lock(&app->track_lock);
+    if (app->track) {
+        fprintf(app->track, "T %llu %u %u\n", (unsigned long long)ns, w, h);
+        fflush(app->track);
+    }
+    pthread_mutex_unlock(&app->track_lock);
+}
+
+static void track_close(CaptureApp *app) {
+    pthread_mutex_lock(&app->track_lock);
+    if (app->track) {
+        fclose(app->track);
+        app->track = NULL;
+    }
+    pthread_mutex_unlock(&app->track_lock);
+}
+
 static void *encoder_writer_thread(void *arg) {
     CaptureApp *app = (CaptureApp *)arg;
 
@@ -425,6 +477,7 @@ static void *encoder_writer_thread(void *arg) {
     bool partial_write = false;
     uint64_t ready_ns = 0;
     uint64_t last_fresh_ns = 0;
+    uint64_t seen_cursor_updates = 0;
     bool stalled = false;
     int exit_code = 0;
 
@@ -520,12 +573,16 @@ static void *encoder_writer_thread(void *arg) {
                 break;
             }
             if (last_write_ns == 0) {
+                track_time_zero(app, now, enc.w, enc.h);
                 emit("READY %u %u", enc.w, enc.h);
                 ready_ns = now;
             }
             last_write_ns = now;
         }
-        if (fresh) {
+        uint64_t cursor_updates = __atomic_load_n(&app->cursor_updates, __ATOMIC_RELAXED);
+        bool cursor_moved = cursor_updates != seen_cursor_updates;
+        seen_cursor_updates = cursor_updates;
+        if (fresh || (cursor_moved && ready_ns)) {
             last_fresh_ns = now;
             if (stalled) emit("FLOWING");
             stalled = false;
@@ -556,6 +613,7 @@ static void *encoder_writer_thread(void *arg) {
         exit_code = EXIT_ENCODER;
     }
     free(buf);
+    track_close(app);
     fflush(stdout);
     _exit(exit_code);
     return NULL;
@@ -681,9 +739,10 @@ static void on_stream_param_changed(void *userdata, uint32_t id, const struct sp
     app->pix_fmt = spa_fmt_to_ffmpeg_pix_fmt(app->format.info.raw.format);
     pthread_mutex_unlock(&app->frame_lock);
 
-    uint8_t params_buf[1024];
+    uint8_t params_buf[2048];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buf, sizeof(params_buf));
-    const struct spa_pod *params[1];
+    const struct spa_pod *params[2];
+    uint32_t n_params = 1;
     params[0] = spa_pod_builder_add_object(
         &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
         SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 2, 16),
@@ -693,7 +752,132 @@ static void on_stream_param_changed(void *userdata, uint32_t id, const struct sp
         SPA_PARAM_BUFFERS_dataType,
         SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr) |
                                  (1 << SPA_DATA_DmaBuf)));
-    pw_stream_update_params(app->pw_stream, params, 1);
+    if (app->track) {
+        params[n_params++] = spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+            SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
+            SPA_PARAM_META_size,
+            SPA_POD_CHOICE_RANGE_Int(CURSOR_META_SIZE(64, 64), CURSOR_META_SIZE(1, 1),
+                                     CURSOR_META_SIZE(CURSOR_MAX, CURSOR_MAX)));
+    }
+    pw_stream_update_params(app->pw_stream, params, n_params);
+}
+
+// Converts one cursor pixel to straight-alpha RGBA. Compositors hand out
+// premultiplied cursors, which is detected per image by the caller.
+static bool cursor_pixel_layout(uint32_t fmt, int *r, int *g, int *b, int *a) {
+    switch (fmt) {
+    case SPA_VIDEO_FORMAT_RGBA: *r = 0; *g = 1; *b = 2; *a = 3; return true;
+    case SPA_VIDEO_FORMAT_RGBx: *r = 0; *g = 1; *b = 2; *a = -1; return true;
+    case SPA_VIDEO_FORMAT_BGRA: *r = 2; *g = 1; *b = 0; *a = 3; return true;
+    case SPA_VIDEO_FORMAT_BGRx: *r = 2; *g = 1; *b = 0; *a = -1; return true;
+    case SPA_VIDEO_FORMAT_ARGB: *r = 1; *g = 2; *b = 3; *a = 0; return true;
+    case SPA_VIDEO_FORMAT_xRGB: *r = 1; *g = 2; *b = 3; *a = -1; return true;
+    case SPA_VIDEO_FORMAT_ABGR: *r = 3; *g = 2; *b = 1; *a = 0; return true;
+    case SPA_VIDEO_FORMAT_xBGR: *r = 3; *g = 2; *b = 1; *a = -1; return true;
+    default: return false;
+    }
+}
+
+// Reads a new cursor image from the metadata; false when it carries none.
+static bool read_cursor_bitmap(CaptureApp *app, const struct spa_meta *meta,
+                               const struct spa_meta_cursor *mc, uint32_t *w_out,
+                               uint32_t *h_out) {
+    if (mc->bitmap_offset < sizeof(*mc) ||
+        (size_t)mc->bitmap_offset + sizeof(struct spa_meta_bitmap) > meta->size)
+        return false;
+    const struct spa_meta_bitmap *bm =
+        SPA_PTROFF(mc, mc->bitmap_offset, const struct spa_meta_bitmap);
+    uint32_t w = bm->size.width, h = bm->size.height;
+    *w_out = w;
+    *h_out = h;
+    if (w == 0 || h == 0) return true;  // an empty image hides the cursor
+    int ri, gi, bi, ai;
+    if (w > CURSOR_MAX || h > CURSOR_MAX || !cursor_pixel_layout(bm->format, &ri, &gi, &bi, &ai))
+        return false;
+    size_t stride = bm->stride > 0 ? (size_t)bm->stride : (size_t)w * 4;
+    size_t start = (size_t)mc->bitmap_offset + bm->offset;
+    if (bm->offset < sizeof(*bm) || stride < (size_t)w * 4 ||
+        start + stride * (h - 1) + (size_t)w * 4 > meta->size)
+        return false;
+    const uint8_t *px = SPA_PTROFF(mc, start, const uint8_t);
+    uint8_t *out = app->shape_tmp;
+    bool premultiplied = true;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *row = px + y * stride;
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t *p = row + x * 4;
+            uint8_t *o = out + ((size_t)y * w + x) * 4;
+            o[0] = p[ri];
+            o[1] = p[gi];
+            o[2] = p[bi];
+            o[3] = ai < 0 ? 255 : p[ai];
+            if (o[0] > o[3] || o[1] > o[3] || o[2] > o[3]) premultiplied = false;
+        }
+    }
+    if (premultiplied) {
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            uint8_t *o = out + i * 4;
+            if (o[3] == 0 || o[3] == 255) continue;
+            for (int c = 0; c < 3; c++) o[c] = (uint8_t)((o[c] * 255 + o[3] / 2) / o[3]);
+        }
+    }
+    return true;
+}
+
+static void track_cursor(CaptureApp *app, struct spa_buffer *buffer) {
+    struct spa_meta *meta = spa_buffer_find_meta(buffer, SPA_META_Cursor);
+    if (!meta || meta->size < sizeof(struct spa_meta_cursor)) return;
+    const struct spa_meta_cursor *mc = meta->data;
+    pthread_mutex_lock(&app->track_lock);
+    if (!app->track) {
+        pthread_mutex_unlock(&app->track_lock);
+        return;
+    }
+    uint32_t id = 0;
+    // An invalid cursor is not over this stream (another display, or hidden).
+    if (spa_meta_cursor_is_valid(mc)) {
+        uint32_t w, h;
+        if (read_cursor_bitmap(app, meta, mc, &w, &h)) {
+            // An empty image hides the cursor until the next image.
+            app->bitmap_hidden = w == 0 || h == 0;
+            size_t len = (size_t)w * h * 4;
+            bool same = app->bitmap_hidden ||
+                        (app->shape && app->shape_w == w && app->shape_h == h &&
+                         app->shape_hx == mc->hotspot.x && app->shape_hy == mc->hotspot.y &&
+                         memcmp(app->shape, app->shape_tmp, len) == 0);
+            uint8_t *copy = same ? NULL : realloc(app->shape, len);
+            if (copy) {
+                memcpy(copy, app->shape_tmp, len);
+                app->shape = copy;
+                app->shape_w = w;
+                app->shape_h = h;
+                app->shape_hx = mc->hotspot.x;
+                app->shape_hy = mc->hotspot.y;
+                app->shape_id++;
+                fprintf(app->track, "S %u %u %u %d %d ", app->shape_id, w, h, app->shape_hx,
+                        app->shape_hy);
+                for (size_t i = 0; i < len; i++) fprintf(app->track, "%02x", copy[i]);
+                fputc('\n', app->track);
+            }
+        }
+        id = app->bitmap_hidden ? 0 : app->shape_id;
+    }
+    int32_t x = mc->position.x, y = mc->position.y;
+    if (id != app->last_id || (id && (x != app->last_x || y != app->last_y))) {
+        uint64_t now = monotonic_ns();
+        fprintf(app->track, "P %llu %d %d %u\n", (unsigned long long)now, x, y, id);
+        app->last_x = x;
+        app->last_y = y;
+        app->last_id = id;
+        __atomic_add_fetch(&app->cursor_updates, 1, __ATOMIC_RELAXED);
+        // Flushed about once a second so a crash keeps most of the track.
+        if (now - app->track_flushed_ns > 1000000000ULL) {
+            fflush(app->track);
+            app->track_flushed_ns = now;
+        }
+    }
+    pthread_mutex_unlock(&app->track_lock);
 }
 
 static void on_stream_process(void *userdata) {
@@ -704,6 +888,8 @@ static void on_stream_process(void *userdata) {
         pw_stream_queue_buffer(app->pw_stream, b);
         return;
     }
+
+    if (app->track) track_cursor(app, b->buffer);
 
     struct spa_data *d = &b->buffer->datas[0];
     uint32_t w = app->format.info.raw.size.width;
@@ -812,7 +998,8 @@ static int usage(const char *argv0) {
     fprintf(stderr,
             "Usage: %s --protocol\n"
             "       %s [--token FILE] [--fps N] [--sources monitor|window|both]\n"
-            "          [--cursor embedded|hidden] [--reset] -- <ffmpeg output args>\n",
+            "          [--cursor embedded|hidden|metadata] [--cursor-track FILE]\n"
+            "          [--reset] -- <ffmpeg output args>\n",
             argv0, argv0);
     return 1;
 }
@@ -824,6 +1011,7 @@ int main(int argc, char **argv) {
     app.sources = XDP_OUTPUT_MONITOR;
     app.cursor_mode = XDP_CURSOR_MODE_EMBEDDED;
     app.pw_fd = -1;
+    const char *track_path = NULL;
 
     int i = 1;
     for (; i < argc; i++) {
@@ -849,8 +1037,12 @@ int main(int argc, char **argv) {
                                                    : XDP_OUTPUT_MONITOR;
             i++;
         } else if (strcmp(a, "--cursor") == 0 && v) {
-            app.cursor_mode =
-                strcmp(v, "hidden") == 0 ? XDP_CURSOR_MODE_HIDDEN : XDP_CURSOR_MODE_EMBEDDED;
+            app.cursor_mode = strcmp(v, "hidden") == 0     ? XDP_CURSOR_MODE_HIDDEN
+                              : strcmp(v, "metadata") == 0 ? XDP_CURSOR_MODE_METADATA
+                                                           : XDP_CURSOR_MODE_EMBEDDED;
+            i++;
+        } else if (strcmp(a, "--cursor-track") == 0 && v) {
+            track_path = v;
             i++;
         } else {
             return usage(argv[0]);
@@ -860,6 +1052,18 @@ int main(int argc, char **argv) {
     app.ffmpeg_tail = &argv[i];
     app.ffmpeg_tail_len = argc - i;
     if (app.target_fps <= 0 || app.target_fps > 240) app.target_fps = 60;
+    pthread_mutex_init(&app.track_lock, NULL);
+    if (app.cursor_mode == XDP_CURSOR_MODE_METADATA) {
+        if (!track_path) return usage(argv[0]);
+        app.shape_tmp = malloc((size_t)CURSOR_MAX * CURSOR_MAX * 4);
+        int fd = open(track_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        app.track = fd >= 0 ? fdopen(fd, "w") : NULL;
+        if (!app.track || !app.shape_tmp) {
+            emit("ERROR cannot write the cursor track %s", track_path);
+            return EXIT_ENCODER;
+        }
+        fputs("HGSR-CURSOR 1\n", app.track);
+    }
 
     // A dead FFmpeg must surface as a write error, not kill the helper.
     signal(SIGPIPE, SIG_IGN);

@@ -49,6 +49,7 @@ It runs on native Wayland (COSMIC, GNOME, KDE Plasma, Hyprland, Sway) and on X11
 - **Zooms like a camera operator.** A critically damped spring (ζ = 1.0) integrated at 240 Hz substeps moves the crop. Pause on something and the camera settles in; move fast and it pulls back to 1.0×, so it never gets stuck zoomed in.
 - **Lets you take over.** Bind your own zoom trigger (keys, mouse buttons, shake, double-click), lock the zoom, or dial depth from 1.0× to 3.2× with the scroll wheel.
 - **Records a screen, a window, or an area.** Pick the source in the Studio drawer; drag out an area on a full-screen overlay to record just that rectangle.
+- **Draws a smooth cursor.** Where the portal can send the cursor separately (COSMIC, GNOME, KDE), the video is captured without it and the cursor is drawn back after you stop, on a path smoothed without lag and at **Normal** or **Large** size. Elsewhere the desktop draws it into the video as usual.
 - **Records sound.** Desktop audio, the microphone, or both mixed, captured on the same clock as the video.
 - **Frames it for presenting.** Place the recording on a gradient or your own image, with padding, rounded corners and a soft shadow. Auto-zoom and the background are applied in one GPU-assisted pass after you stop.
 - **Never loses a take.** Video time comes from the wall clock, so a recording lasts exactly as long as you recorded, even on a still screen. Captures are written as fragmented MP4, so a crash keeps everything up to the last second, and if the capture stops on its own the island says why and saves what it has.
@@ -302,6 +303,7 @@ HYPERGSR_THEME=light HYPERGSR_EXPANDED=1 ./target/release/gpu-recorder-rs
 ./target/release/gpu-recorder-rs --record-seconds 5
 
 # Re-render a capture with saved cursor telemetry and the current background
+# (add a cursor track, <capture>.cursor, to draw the studio cursor)
 ./target/release/gpu-recorder-rs --render-capture capture.mp4 \
   ~/.cache/hypergsr/telemetry/HyperGSR_<time>.json out.mp4
 
@@ -330,7 +332,7 @@ above other windows; drag it by its left end to move it out of the way.
 Recordings are saved to `~/Videos`; **Change…** next to "Save to" in the Record tab
 picks another folder (the Flatpak can only write where its file chooser grants
 access). The folder, source, audio, frame rate, quality and background you pick in
-the Studio drawer are remembered in
+the Studio drawer (and the cursor size) are remembered in
 `~/.config/hypergsr/settings.json`.
 
 | Variable | Effect |
@@ -338,6 +340,7 @@ the Studio drawer are remembered in
 | `HYPERGSR_ENCODER=x264` | Skip hardware encoders and use libx264 |
 | `HYPERGSR_OPEN_STUDIO=1`, `HYPERGSR_STUDIO_TAB=record` or `camera` | Start with the Studio drawer open on that tab |
 | `HYPERGSR_GDK_BACKEND=x11` or `wayland` | Override the island's display backend (X11 is the default on GNOME) |
+| `HYPERGSR_NATIVE_CURSOR=1` | Let the desktop draw the cursor into the video instead of the smoothed studio cursor |
 
 With several displays, auto-zoom follows the cursor only while it is on the
 recorded one and holds the wide view while it is elsewhere. Displays are told
@@ -391,7 +394,8 @@ flowchart LR
 
 3. **Two-pass trajectory planning** (`build_smooth_60fps_camera_frames` in [`src/encoder.rs`](src/encoder.rs)). After recording, the cursor telemetry is turned into bounded zoom segments (about 1.75 s per focus cluster), with pull-back to 1.0× during fast travel and smooth transitions.
 4. **Wall-clock capture** ([`src/pw_portal_capture.c`](src/pw_portal_capture.c)). The helper sends a frame to FFmpeg only when the compositor delivers a new one (plus a keepalive), and FFmpeg stamps each with the wall clock and fills gaps at a constant frame rate. Video time zero is the first captured frame, which is also when cursor telemetry starts, so zooms land exactly where you clicked.
-5. **One-pass studio render** ([`src/studio_render.rs`](src/studio_render.rs)). FFmpeg decodes the capture on the GPU into NV12, a multithreaded compositor applies the zoom and places the frame on the background ([`src/backgrounds.rs`](src/backgrounds.rs)), and NVENC, VAAPI or x264 encodes the final MP4, with decoding, compositing and encoding overlapped. A 46 s 1080p60 test clip with zoom and background renders in about 14 s on an RTX 3050 laptop. When neither zoom nor background changes a pixel, the capture is only remuxed.
+5. **One-pass studio render** ([`src/studio_render.rs`](src/studio_render.rs)). FFmpeg decodes the capture on the GPU into NV12, a multithreaded compositor applies the zoom and places the frame on the background ([`src/backgrounds.rs`](src/backgrounds.rs)), and NVENC, VAAPI or x264 encodes the final MP4, with decoding, compositing and encoding overlapped. A 46 s 1080p60 test clip with zoom and background renders in about 14 s on an RTX 3050 laptop. When neither zoom, background nor a studio cursor changes a pixel, the capture is only remuxed.
+6. **A cursor of its own** ([`src/cursor_track.rs`](src/cursor_track.rs)). With the portal's metadata cursor mode, the helper writes the cursor's image and position beside the video instead of into it. The render smooths the path with a Gaussian over the whole recording (no lag, since the future is known), keeps jumps between displays sharp, and blends the cursor into the NV12 frame after the zoom, so it scales with the camera.
 
 ## Compared with other recorders
 

@@ -70,6 +70,10 @@ const SYMBOLIC_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/hgsr-ctrl-click-symbolic.svg"),
     ),
     (
+        "hgsr-cursor-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-cursor-symbolic.svg"),
+    ),
+    (
         "hgsr-double-click-symbolic.svg",
         include_bytes!("../assets/icons/hgsr-double-click-symbolic.svg"),
     ),
