@@ -167,7 +167,7 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    bytes.chunks_exact(2).map(|p| Some(digit(p[0])? << 4 | digit(p[1])?)).collect()
+    bytes.as_chunks::<2>().0.iter().map(|p| Some(digit(p[0])? << 4 | digit(p[1])?)).collect()
 }
 
 /// Gaussian smoothing of the path, without lag since the whole recording is
@@ -228,7 +228,7 @@ impl PreparedShape {
     pub fn new(shape: &Shape) -> Self {
         let texels = shape
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|p| {
                 let a = p[3] as f32 / 255.0;
                 let (r, g, b) = (p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a);
