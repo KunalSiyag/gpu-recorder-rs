@@ -12,6 +12,7 @@ pub mod gui;
 pub mod island_position;
 pub mod project;
 pub mod region_select;
+pub mod replay;
 pub mod settings;
 pub mod shaders;
 pub mod shortcuts;
@@ -105,6 +106,7 @@ fn main() -> anyhow::Result<()> {
         a == "--report"
             || a == "--export-demo"
             || a == "--record-seconds"
+            || a == "--replay"
             || a == "--render-capture"
             || a == "--web"
             || a == "--web-only"
@@ -196,6 +198,39 @@ fn main() -> anyhow::Result<()> {
         if let Some(saved) = state.lock().stop_recording()? {
             println!("✔ Saved Zero-Copy GPU recording -> {}", saved.display());
         }
+        return Ok(());
+    }
+
+    // --replay <keep> <run>: run instant replay for <run> seconds, then save
+    // a clip of the last <keep> seconds.
+    if let Some(idx) = args.iter().position(|a| a == "--replay") {
+        let num = |i: usize| args.get(idx + i).and_then(|v| v.parse::<u32>().ok());
+        let (Some(keep), Some(run)) = (num(1), num(2)) else {
+            anyhow::bail!("usage: --replay <keep seconds> <run seconds>");
+        };
+        print_banner(&state);
+        state.lock().settings.replay_sec = keep;
+        state.lock().start_replay()?;
+        let started = std::time::Instant::now();
+        while state.lock().replay_buffered_sec().is_none() {
+            if let Some(reason) = state.lock().poll_replay_failure() {
+                anyhow::bail!("instant replay stopped: {reason}");
+            }
+            if started.elapsed().as_secs() > 120 {
+                anyhow::bail!("Screen capture did not start within two minutes");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(run.into()));
+        if let Some(reason) = state.lock().poll_replay_failure() {
+            anyhow::bail!("instant replay stopped: {reason}");
+        }
+        let clip = state.lock().replay_clip()?;
+        let saved = clip.save();
+        if let Some(replay) = state.lock().take_replay() {
+            replay.stop();
+        }
+        println!("✔ Saved replay clip -> {}", saved?.display());
         return Ok(());
     }
 

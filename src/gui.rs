@@ -1128,6 +1128,22 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     pause_btn.set_tooltip_text(Some(&format!("Pause ({})", crate::shortcuts::PAUSE_LABEL)));
     pause_btn.set_visible(false);
 
+    // Instant replay: starts the buffer, then saves clips of the last seconds.
+    let replay_btn = icon_button("replay", "Replay");
+    replay_btn.add_css_class("studio-pill");
+    replay_btn.set_tooltip_text(Some("Start instant replay: keeps the last seconds so you can save them as a clip"));
+    replay_btn.set_visible(state.lock().settings.replay_sec > 0);
+    let clip_btn = icon_button("replay", "Save clip");
+    clip_btn.add_css_class("shutter-rec");
+    clip_btn.set_visible(false);
+    let replay_stop_btn = Button::new();
+    let replay_stop_icon = Image::from_file(asset_path("icon-stop.svg"));
+    replay_stop_icon.set_pixel_size(12);
+    replay_stop_btn.set_child(Some(&replay_stop_icon));
+    replay_stop_btn.add_css_class("shutter-stop");
+    replay_stop_btn.set_tooltip_text(Some("Stop instant replay"));
+    replay_stop_btn.set_visible(false);
+
     // Opens the editor on the latest recording.
     let edit_btn = icon_button("trim", "Edit");
     edit_btn.add_css_class("studio-pill");
@@ -1169,6 +1185,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     top_row.append(&resume_btn);
     top_row.append(&pause_btn);
     top_row.append(&rec_btn);
+    top_row.append(&replay_btn);
+    top_row.append(&clip_btn);
+    top_row.append(&replay_stop_btn);
     top_row.append(&edit_btn);
     top_row.append(&theme_btn);
     top_row.append(&expand_btn);
@@ -2396,6 +2415,76 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             }
         });
     }
+    // Instant replay. The buffer's look reuses the recording one.
+    let clip_slot: Arc<parking_lot::Mutex<Option<Result<PathBuf, String>>>> = Arc::default();
+    let show_replay: Rc<dyn Fn(bool)> = {
+        let show_recording = show_recording.clone();
+        let (rec, replay, clip, stop, edit) =
+            (rec_btn.clone(), replay_btn.clone(), clip_btn.clone(), replay_stop_btn.clone(), edit_btn.clone());
+        let s_lbl = status_lbl.clone();
+        Rc::new(move |on: bool| {
+            show_recording(on);
+            rec.set_visible(!on);
+            replay.set_visible(!on);
+            clip.set_visible(on);
+            stop.set_visible(on);
+            if on {
+                edit.set_visible(false);
+            }
+            s_lbl.set_text(if on { "Starting…" } else { "HyperGSR" });
+        })
+    };
+    {
+        let st = state.clone();
+        let footer = footer_lbl.clone();
+        let show_replay = show_replay.clone();
+        replay_btn.connect_clicked(move |_| {
+            let started = st.lock().start_replay();
+            match started {
+                Ok(()) => {
+                    show_replay(true);
+                    let keep = st.lock().settings.replay_sec;
+                    footer.set_text(&format!(
+                        "● Instant replay is on: Save clip (or {}) keeps the last {} s",
+                        crate::shortcuts::DEFAULT_LABEL,
+                        keep
+                    ));
+                }
+                Err(err) => footer.set_text(&format!("{err:#}")),
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let footer = footer_lbl.clone();
+        let s_lbl = status_lbl.clone();
+        let slot = clip_slot.clone();
+        clip_btn.connect_clicked(move |btn| {
+            let clip = st.lock().replay_clip();
+            match clip {
+                Ok(clip) => {
+                    btn.set_sensitive(false);
+                    s_lbl.set_text("Saving clip…");
+                    let slot = slot.clone();
+                    std::thread::spawn(move || *slot.lock() = Some(clip.save().map_err(|e| format!("{e:#}"))));
+                }
+                Err(err) => footer.set_text(&format!("{err:#}")),
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let show_replay = show_replay.clone();
+        let edit = edit_btn.clone();
+        replay_stop_btn.connect_clicked(move |_| {
+            if let Some(replay) = st.lock().take_replay() {
+                std::thread::spawn(move || replay.stop());
+            }
+            show_replay(false);
+            edit.set_visible(latest_recording(&st.lock().videos_dir).is_some());
+        });
+    }
+
     // `hypergsr --edit <video>` with an island already running.
     {
         let action = gio::SimpleAction::new("edit", Some(glib::VariantTy::STRING));
@@ -2417,7 +2506,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     {
         let action = gio::SimpleAction::new("toggle-record", None);
         let rec = rec_btn.clone();
-        action.connect_activate(move |_, _| rec.emit_clicked());
+        let clip = clip_btn.clone();
+        let st = state.clone();
+        // While instant replay runs, the start/stop shortcut saves a clip.
+        action.connect_activate(move |_, _| {
+            if st.lock().replay_active() {
+                clip.emit_clicked();
+            } else {
+                rec.emit_clicked();
+            }
+        });
         app.add_action(&action);
         let action = gio::SimpleAction::new("pause-record", None);
         let pause = pause_btn.clone();
@@ -2427,6 +2525,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             }
         });
         app.add_action(&action);
+    }
+    if std::env::var("HYPERGSR_START_REPLAY").as_deref() == Ok("1") {
+        let replay = replay_btn.clone();
+        glib::timeout_add_local_once(Duration::from_millis(700), move || replay.emit_clicked());
     }
     if std::env::var("HYPERGSR_START_RECORDING").as_deref() == Ok("1") {
         let rec = rec_btn.clone();
@@ -2461,7 +2563,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let busy_flag = bg_zoom_busy.clone();
         close_btn.connect_clicked(move |_| {
             // Save a running recording, and let a render in progress finish,
-            // before quitting; the island hides at once.
+            // before quitting; the island hides at once. Instant replay just
+            // stops.
+            if let Some(replay) = st.lock().take_replay() {
+                replay.stop();
+            }
             let job = st.lock().take_recording();
             if job.is_none() && !busy_flag.load(Ordering::Relaxed) {
                 win.close();
@@ -2502,7 +2608,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let busy_flag = bg_zoom_busy.clone();
         let close_btn = close_btn.clone();
         window.connect_close_request(move |_| {
-            let pending = st.lock().is_recording() || busy_flag.load(Ordering::Relaxed);
+            let pending = {
+                let g = st.lock();
+                g.is_recording() || g.replay_active()
+            } || busy_flag.load(Ordering::Relaxed);
             if pending {
                 close_btn.emit_clicked();
                 return glib::Propagation::Stop;
@@ -2532,6 +2641,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let preset_btns = combo_preset_btns.clone();
         let resume_b = resume_btn.clone();
         let edit_b = edit_btn.clone();
+        let replay_b = replay_btn.clone();
+        let clip_b = clip_btn.clone();
+        let clip_slot = clip_slot.clone();
+        let show_replay = show_replay.clone();
         let pause_b = pause_btn.clone();
         let pause_icon = pause_icon.clone();
         let mut last_pause_state = (false, false);
@@ -2575,6 +2688,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let countdown = g.countdown_left();
             let user_paused = g.is_paused_by_user();
             let hide_setting = g.settings.hide_while_recording;
+            let replay_wanted = g.settings.replay_sec > 0;
+            let replay_failure = g.poll_replay_failure();
+            let replay_buffered = g.replay_active().then(|| g.replay_buffered_sec());
 
             // Check if user is in "Record Combo…" self-registration mode and performed a global gesture/button/key
             let mut learned_label: Option<String> = None;
@@ -2656,6 +2772,39 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             if let Some(reason) = failure {
                 stop_and_save(Some(reason));
                 return ControlFlow::Continue;
+            }
+            if let Some(reason) = replay_failure {
+                show_replay(false);
+                f_lbl.set_text(&format!("Instant replay stopped: {reason}"));
+            }
+            // The Replay button follows the setting while idle.
+            if replay_buffered.is_none() && !is_rec && replay_b.is_visible() != replay_wanted {
+                replay_b.set_visible(replay_wanted);
+                win.set_default_size(1, 1);
+            }
+            if let Some(saved) = clip_slot.lock().take() {
+                clip_b.set_sensitive(true);
+                last_s_str.clear();
+                match saved {
+                    Ok(path) => {
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        st.lock().last_saved_file = Some(path.display().to_string());
+                        f_lbl.set_text(&format!("Saved {name}"));
+                    }
+                    Err(err) => f_lbl.set_text(&format!("Clip not saved: {err}")),
+                }
+            }
+            if let Some(buffered) = replay_buffered {
+                let new_s = match buffered {
+                    _ if !clip_b.is_sensitive() => "Saving clip…".to_string(),
+                    Some(sec) => format!("● Replay {:02}:{:02}", (sec as u64) / 60, (sec as u64) % 60),
+                    None => "Starting…".to_string(),
+                };
+                if new_s != last_s_str {
+                    s_lbl.set_text(&new_s);
+                    last_s_str = new_s;
+                }
+                wave.queue_draw();
             }
 
             if paused != last_paused {

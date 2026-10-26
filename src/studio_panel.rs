@@ -458,6 +458,35 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     webcam_row.append(&webcam_track);
     rec_card.append(&webcam_row);
 
+    // Instant replay keeps the last seconds on disk, ready to save.
+    let replay_row = GtkBox::new(Orientation::Horizontal, 6);
+    replay_row.append(&crate::gui::icon("replay", 14));
+    let replay_idx = match settings.replay_sec {
+        0 => 0,
+        1..=60 => 1,
+        _ => 2,
+    };
+    let (replay_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["No replay", "Last 30 s", "Last 2 min"], replay_idx, move |i| {
+            let sec = [0, 30, 120][i];
+            update(&st, |s| s.replay_sec = sec);
+            footer.set_text(&if sec == 0 {
+                "○ Instant replay off".to_string()
+            } else {
+                format!("✓ The Replay button keeps the last {} on hand to save as a clip", if sec == 30 { "30 seconds" } else { "2 minutes" })
+            });
+        })
+    };
+    replay_track.set_hexpand(true);
+    replay_track.set_tooltip_text(Some(
+        "Instant replay records continuously into a small buffer; Save clip writes the last \
+         seconds to a video, as captured",
+    ));
+    replay_row.append(&replay_track);
+    rec_card.append(&replay_row);
+
     // A countdown on the running capture, cut from the video afterwards.
     let countdown_row = GtkBox::new(Orientation::Horizontal, 6);
     countdown_row.append(&crate::gui::icon("timer", 14));
