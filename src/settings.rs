@@ -38,6 +38,15 @@ pub enum Quality {
     High,
 }
 
+/// Where the webcam bubble goes, if anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Webcam {
+    #[default]
+    Off,
+    Left,
+    Right,
+}
+
 /// Shape of an exported video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Aspect {
@@ -196,6 +205,10 @@ pub struct RecorderSettings {
     pub countdown_sec: u32,
     /// Filter background noise out of the microphone.
     pub clean_mic: bool,
+    /// Record the webcam and show it as a bubble in a bottom corner.
+    pub webcam: Webcam,
+    /// Bubble diameter as a fraction of the video's shorter side.
+    pub webcam_size: f32,
 }
 
 impl Default for RecorderSettings {
@@ -214,6 +227,8 @@ impl Default for RecorderSettings {
             save_dir: None,
             countdown_sec: 3,
             clean_mic: true,
+            webcam: Webcam::Off,
+            webcam_size: 0.24,
         }
     }
 }
@@ -248,6 +263,7 @@ impl RecorderSettings {
     fn sanitized(mut self) -> Self {
         self.fps = if self.fps <= 30 { 30 } else { 60 };
         self.countdown_sec = self.countdown_sec.min(10);
+        self.webcam_size = if self.webcam_size.is_finite() { self.webcam_size.clamp(0.1, 0.4) } else { 0.24 };
         self.cursor_scale = if self.cursor_scale.is_finite() { self.cursor_scale.clamp(1.0, 2.0) } else { 1.0 };
         self.region = self.region.and_then(Region::normalized);
         // A folder that was removed or unmounted falls back to ~/Videos.

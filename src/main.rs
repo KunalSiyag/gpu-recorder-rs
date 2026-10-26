@@ -19,6 +19,7 @@ pub mod state;
 pub mod studio_panel;
 pub mod studio_render;
 pub mod web_ui;
+pub mod webcam;
 pub mod x11_above;
 pub mod zoom_engine;
 
@@ -238,6 +239,17 @@ fn main() -> anyhow::Result<()> {
         let events: Vec<encoder::RecordedZoomEvent> =
             serde_json::from_str(&std::fs::read_to_string(telemetry)?)?;
         let settings = state.lock().settings.clone();
+        // --webcam <video>@<sec>: a camera clip whose <sec> mark lines up
+        // with the capture's first frame.
+        let webcam = option("--webcam").and_then(|v| v.rsplit_once('@')).and_then(|(path, offset)| {
+            Some(webcam::WebcamClip {
+                path: PathBuf::from(path),
+                start: 0.0,
+                clock: vec![webcam::ClockSpan { shift: 0.0, zero: offset.parse().ok()?, last: f64::INFINITY }],
+                corner: if settings.webcam == settings::Webcam::Left { settings::Webcam::Left } else { settings::Webcam::Right },
+                size: settings.webcam_size,
+            })
+        });
         let job = studio_render::RenderJob {
             capture: PathBuf::from(capture),
             output: PathBuf::from(output),
@@ -253,6 +265,7 @@ fn main() -> anyhow::Result<()> {
             cuts,
             aspect,
             format,
+            webcam,
         };
         let started = std::time::Instant::now();
         let saved = studio_render::render(&job, &std::sync::atomic::AtomicU32::new(0))?;

@@ -85,6 +85,8 @@ pub struct StudioState {
     countdown_pending: u32,
     /// When the countdown ends.
     countdown_end: Option<Instant>,
+    /// Records the webcam beside the screen.
+    webcam: Option<crate::webcam::WebcamRecorder>,
     /// Lazy-allocated buffers used ONLY when `--web` requests a rendered JPEG frame
     lazy_web_buffers: Option<(ScreenCapturer, FrameBuffer, FrameBuffer)>,
 }
@@ -138,6 +140,7 @@ impl StudioState {
             paused_at: None,
             countdown_pending: 0,
             countdown_end: None,
+            webcam: None,
             lazy_web_buffers: None,
         }
     }
@@ -453,6 +456,16 @@ impl StudioState {
             }
         };
         self.repick_source = false;
+        self.webcam = None;
+        if settings.webcam != crate::settings::Webcam::Off {
+            match crate::webcam::default_device() {
+                Some(device) => match crate::webcam::WebcamRecorder::start(&device.path, &webcam_path(&capture_path)) {
+                    Ok(cam) => self.webcam = Some(cam),
+                    Err(err) => eprintln!("[HyperGSR] {err:#}; recording without the webcam"),
+                },
+                None => eprintln!("[HyperGSR] no webcam found; recording without it"),
+            }
+        }
         self.recording_settings = Some(settings.clone());
         self.target_fps = settings.fps;
         self.recording_start = None;
@@ -562,6 +575,7 @@ impl StudioState {
         Some(StopJob {
             parts,
             session,
+            webcam: self.webcam.take(),
             live_cuts,
             capture,
             auto_zoom: self.auto_apply_zoom_on_stop && settings.auto_zoom,
@@ -630,6 +644,7 @@ pub struct StopJob {
     session: Option<ActiveEncoderSession>,
     /// Cuts of the running part.
     live_cuts: Vec<(f64, f64)>,
+    webcam: Option<crate::webcam::WebcamRecorder>,
     /// Where the whole recording's capture goes.
     capture: PathBuf,
     auto_zoom: bool,
@@ -647,10 +662,36 @@ impl StopJob {
             live.cuts = self.live_cuts;
             parts.push(live);
         }
-        let done = join_parts(parts, &self.capture)?;
+        let done = join_parts(parts, &self.capture);
+        let webcam = self.webcam.and_then(|cam| cam.finish());
+        let done = match done {
+            Ok(done) => done,
+            Err(err) => {
+                if let Some((path, _)) = webcam {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(err);
+            }
+        };
+        let webcam = webcam.and_then(|(path, start)| {
+            if done.clock.is_empty() {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+            Some(crate::webcam::WebcamClip {
+                path,
+                start,
+                clock: done.clock.clone(),
+                corner: self.settings.webcam,
+                size: self.settings.webcam_size,
+            })
+        });
         let capture = done.path;
         if !capture.exists() || std::fs::metadata(&capture).is_ok_and(|m| m.len() == 0) {
             let _ = std::fs::remove_file(&capture);
+            if let Some(cam) = &webcam {
+                let _ = std::fs::remove_file(&cam.path);
+            }
             anyhow::bail!(done.error.unwrap_or_else(|| "nothing was recorded".to_string()));
         }
         if let Some(err) = &done.error {
@@ -681,6 +722,7 @@ impl StopJob {
             cuts: done.cuts,
             aspect: Default::default(),
             format: Default::default(),
+            webcam,
         };
         let result = studio_render::render(&job, progress).or_else(|err| {
             eprintln!("[HyperGSR] {err:#}; saving the recording without effects");
@@ -695,6 +737,9 @@ impl StopJob {
             // The fragmented capture plays as is; hand it over under the final name.
             Err(err) => {
                 eprintln!("[HyperGSR] {err:#}; keeping the raw capture");
+                if let Some(cam) = &job.webcam {
+                    let _ = std::fs::remove_file(&cam.path);
+                }
                 let _ = std::fs::remove_file(&output);
                 Ok(std::fs::rename(&capture, &output).map_or(capture, |_| output))
             }
@@ -704,6 +749,9 @@ impl StopJob {
     /// Stops the capture and deletes everything it wrote (a recording
     /// cancelled during its countdown).
     pub fn discard(self) {
+        if let Some(cam) = self.webcam {
+            cam.discard();
+        }
         let mut paths: Vec<PathBuf> = self.parts.into_iter().map(|p| p.path).collect();
         if let Some(session) = self.session {
             paths.push(session.finish_capture().path);
@@ -822,11 +870,17 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
     }
     let mut cursor: Option<crate::cursor_track::CursorTrack> = None;
     let mut cuts = Vec::new();
+    let mut clock = Vec::new();
     for ((shift, last), part) in part_shifts(&spans).into_iter().zip(parts.iter_mut()) {
         if let Some(track) = part.cursor.take() {
             cursor.get_or_insert_with(Default::default).append_shifted(track, shift, last);
         }
         cuts.extend(shift_cuts(&part.cuts, shift, last));
+        clock.extend(part.clock.iter().map(|s| crate::webcam::ClockSpan {
+            shift: shift + s.shift,
+            zero: s.zero,
+            last: s.last.min(last),
+        }));
     }
     let paired: Vec<_> = spans
         .into_iter()
@@ -842,6 +896,7 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
         keep_sec: None,
         cursor,
         cuts,
+        clock,
     })
 }
 
@@ -857,6 +912,14 @@ fn shift_cuts(cuts: &[(f64, f64)], shift: f64, last: f64) -> Vec<(f64, f64)> {
         .filter(|(a, _)| *a < last)
         .map(|&(a, b)| (shift + a, shift + b.min(last)))
         .collect()
+}
+
+/// `HyperGSR_<time>.capture.mp4` records the webcam to
+/// `HyperGSR_<time>.webcam.mkv`.
+fn webcam_path(capture: &Path) -> PathBuf {
+    let name = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = name.strip_suffix(CAPTURE_SUFFIX).unwrap_or(&name);
+    capture.with_file_name(format!("{stem}.webcam.mkv"))
 }
 
 /// `HyperGSR_<time>.capture.mp4` becomes `HyperGSR_<time>.mp4`.

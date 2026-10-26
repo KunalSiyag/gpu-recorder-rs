@@ -113,6 +113,8 @@ pub enum RecordingEngineKind {
 pub struct CaptureStatus {
     /// When the first frame reached the encoder: time zero of the video.
     pub ready_at: Option<Instant>,
+    /// The same moment on CLOCK_MONOTONIC, in seconds.
+    pub ready_mono: Option<f64>,
     pub size: Option<(u32, u32)>,
     pub error: Option<String>,
     /// FFmpeg's pid, which is also its process group.
@@ -190,9 +192,11 @@ pub struct FinishedCapture {
     pub cursor: Option<crate::cursor_track::CursorTrack>,
     /// Video-time ranges to leave out: the countdown and pauses.
     pub cuts: Vec<(f64, f64)>,
+    /// When video time was captured on CLOCK_MONOTONIC, to line up the webcam.
+    pub clock: Vec<crate::webcam::ClockSpan>,
 }
 
-const HELPER_PROTOCOL: &str = "5";
+const HELPER_PROTOCOL: &str = "6";
 /// The helper's exit code after it reported LOST.
 const EXIT_STREAM_LOST: i32 = 6;
 
@@ -214,8 +218,10 @@ pub struct ActiveEncoderSession {
 /// Applies one line of the helper's stdout protocol.
 fn apply_helper_line(st: &mut CaptureStatus, line: &str) {
     if let Some(rest) = line.strip_prefix("READY ") {
-        let mut it = rest.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
-        st.size = it.next().zip(it.next());
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let num = |i: usize| fields.get(i).and_then(|v| v.parse::<u32>().ok());
+        st.size = num(0).zip(num(1));
+        st.ready_mono = fields.get(2).and_then(|v| v.parse::<u64>().ok()).map(|ns| ns as f64 / 1e9);
         st.ready_at.get_or_insert_with(Instant::now);
     } else if let Some(msg) = line.strip_prefix("ERROR ") {
         st.error.get_or_insert_with(|| msg.to_string());
@@ -652,6 +658,7 @@ impl ActiveEncoderSession {
     /// a few seconds, so call it off the UI thread.
     pub fn finish_capture(mut self) -> FinishedCapture {
         let mut error = None;
+        let mut clock = Vec::new();
         let mut keep_sec = self.interrupted.as_ref().map(|(sec, _)| *sec);
         match self.kind {
             RecordingEngineKind::ZeroCopyGsr {
@@ -685,6 +692,11 @@ impl ActiveEncoderSession {
                 if let Some((sec, _)) = lost {
                     keep_sec = Some(keep_sec.map_or(sec, |k| k.min(sec)));
                 }
+                clock.extend(st.ready_mono.map(|zero| crate::webcam::ClockSpan {
+                    shift: 0.0,
+                    zero,
+                    last: keep_sec.unwrap_or(f64::INFINITY),
+                }));
             }
             RecordingEngineKind::FfmpegPipe {
                 ref mut child,
@@ -708,6 +720,7 @@ impl ActiveEncoderSession {
             keep_sec,
             cursor,
             cuts: Vec::new(),
+            clock,
         }
     }
 
@@ -1143,8 +1156,9 @@ mod tests {
     #[test]
     fn parses_stall_and_loss_reports() {
         let mut st = CaptureStatus::default();
-        apply_helper_line(&mut st, "READY 1920 1080");
+        apply_helper_line(&mut st, "READY 1920 1080 12345678900000");
         assert_eq!(st.size, Some((1920, 1080)));
+        assert_eq!(st.ready_mono, Some(12345.6789));
         apply_helper_line(&mut st, "STALLED 64.900");
         assert_eq!(st.stalled.map(|(_, sec)| sec), Some(64.9));
         apply_helper_line(&mut st, "FLOWING");

@@ -3,7 +3,7 @@
 
 use crate::backgrounds::{swatch_colors, PRESETS};
 use crate::gui::{draw_rounded_rect, icon_button, set_active_segment, set_btn_text};
-use crate::settings::{AudioMode, BackgroundKind, CaptureSource, Quality, RecorderSettings};
+use crate::settings::{AudioMode, BackgroundKind, CaptureSource, Quality, RecorderSettings, Webcam};
 use crate::state::SharedStudioState;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, CssProvider, DrawingArea, Label, Orientation};
@@ -421,6 +421,42 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     }
     cursor_row.append(&ripple_btn);
     rec_card.append(&cursor_row);
+
+    // The webcam, recorded beside the screen and drawn as a bubble.
+    let webcam_row = GtkBox::new(Orientation::Horizontal, 6);
+    webcam_row.append(&crate::gui::icon("webcam", 14));
+    let camera = crate::webcam::default_device();
+    let webcam_idx = match settings.webcam {
+        Webcam::Off => 0,
+        Webcam::Left => 1,
+        Webcam::Right => 2,
+    };
+    let (webcam_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["No webcam", "Bottom left", "Bottom right"], webcam_idx, move |i| {
+            let corner = [Webcam::Off, Webcam::Left, Webcam::Right][i];
+            update(&st, |s| s.webcam = corner);
+            footer.set_text(if corner == Webcam::Off {
+                "○ No webcam"
+            } else {
+                "✓ Your webcam appears as a round bubble in the saved video"
+            });
+        })
+    };
+    webcam_track.set_hexpand(true);
+    match &camera {
+        Some(cam) => webcam_track.set_tooltip_text(Some(&format!(
+            "Records {} beside the screen and places it as a round bubble when saving",
+            cam.name
+        ))),
+        None => {
+            webcam_track.set_sensitive(false);
+            webcam_track.set_tooltip_text(Some("No webcam found"));
+        }
+    }
+    webcam_row.append(&webcam_track);
+    rec_card.append(&webcam_row);
 
     // A countdown on the running capture, cut from the video afterwards.
     let countdown_row = GtkBox::new(Orientation::Horizontal, 6);
