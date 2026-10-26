@@ -22,7 +22,8 @@
 //                                       and the stream size
 //
 // stdout carries one line per event:
-//   READY <width> <height>   the first frame went to FFmpeg (video time zero)
+//   READY <width> <height> <ns>  the first frame went to FFmpeg (video time
+//                            zero) at CLOCK_MONOTONIC <ns>
 //   STALLED <sec>            no new image (or metadata cursor move) for a while;
 //                            <sec> is the video time of the last one (a still
 //                            screen also stalls)
@@ -60,7 +61,7 @@
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
 
-#define HELPER_PROTOCOL 5
+#define HELPER_PROTOCOL 6
 
 // libportal.so.1 ABI, declared here so only the shared library is needed.
 typedef struct _XdpPortal XdpPortal;
@@ -574,7 +575,7 @@ static void *encoder_writer_thread(void *arg) {
             }
             if (last_write_ns == 0) {
                 track_time_zero(app, now, enc.w, enc.h);
-                emit("READY %u %u", enc.w, enc.h);
+                emit("READY %u %u %llu", enc.w, enc.h, (unsigned long long)now);
                 ready_ns = now;
             }
             last_write_ns = now;

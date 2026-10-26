@@ -154,6 +154,7 @@ impl Model {
                 cuts: Vec::new(),
                 aspect: Aspect::Original,
                 format: ExportFormat::Mp4,
+                webcam: None,
             },
         };
         job.cuts = trimmed_cuts(&job.cuts, self.trim, self.duration);

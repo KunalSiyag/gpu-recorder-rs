@@ -44,6 +44,9 @@ pub struct RenderJob {
     pub cuts: Vec<(f64, f64)>,
     pub aspect: Aspect,
     pub format: ExportFormat,
+    /// The webcam, drawn as a bubble.
+    #[serde(default)]
+    pub webcam: Option<crate::webcam::WebcamClip>,
 }
 
 /// The parts of a `duration`-second video that `cuts` keep, in order.
@@ -231,7 +234,11 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
     if kept.is_empty() {
         bail!("nothing is left after the cuts");
     }
-    let plain = track.is_none() && !job.background.is_enabled() && cursor.is_none() && clicks.is_empty();
+    let plain = track.is_none()
+        && !job.background.is_enabled()
+        && cursor.is_none()
+        && clicks.is_empty()
+        && job.webcam.is_none();
     if plain && !reshaped && job.cuts.is_empty() && job.format == ExportFormat::Mp4 {
         ffmpeg::remux_to_mp4(&job.capture, &job.output)?;
         progress.store(1000, Ordering::Relaxed);
@@ -283,12 +290,21 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
         .build()
         .context("cannot start render threads")?;
     let encoder = ffmpeg::capabilities().encoder.clone();
+    // A webcam that cannot be decoded leaves the video without its bubble.
+    let mut webcam = job.webcam.as_ref().and_then(|clip| {
+        let (d, center) = clip.placement(w, h);
+        crate::webcam::WebcamFeed::open(clip, d)
+            .map_err(|err| eprintln!("[HyperGSR] {err:#}; saving without the webcam"))
+            .ok()
+            .map(|feed| (clip, feed, center))
+    });
     let frames = pool.install(|| {
         let effects = Effects {
             compositor: &compositor,
             camera: track.as_deref(),
             cursor: cursor.as_ref(),
             clicks: &clicks,
+            webcam: webcam.as_mut().map(|(clip, feed, center)| (*clip, feed, *center)),
         };
         run_pipeline(job, &encoder, effects, &tmp, &window, info.video_start_sec, progress)
     });
@@ -392,12 +408,14 @@ struct Effects<'a> {
     cursor: Option<&'a CursorFrames>,
     /// From [`click_points`], in time order.
     clicks: &'a [(f64, f32, f32)],
+    /// The webcam, its decoder, and where the bubble's center goes.
+    webcam: Option<(&'a crate::webcam::WebcamClip, &'a mut crate::webcam::WebcamFeed, (f32, f32))>,
 }
 
 fn run_pipeline(
     job: &RenderJob,
     encoder: &VideoEncoder,
-    effects: Effects<'_>,
+    mut effects: Effects<'_>,
     tmp: &Path,
     window: &DecodeWindow,
     video_start_sec: f64,
@@ -521,6 +539,12 @@ fn run_pipeline(
             }
             if let Some(cursor) = effects.cursor {
                 cursor.draw(frame, &mut output, compositor, cam);
+            }
+            if let Some((clip, feed, center)) = effects.webcam.as_mut() {
+                let d = feed.size();
+                if let Some(px) = clip.frame_at(t).and_then(|k| feed.frame_at(k)) {
+                    crate::webcam::draw_bubble_nv12(as_bytes_mut(&mut output), w, h, px, d, *center);
+                }
             }
             let _ = free_in_tx.send(input);
             if full_out_tx.send(output).is_err() {
@@ -726,7 +750,7 @@ impl<T: Sample> Plane<T> {
 }
 
 /// RGB to limited-range BT.601 YCbCr, the matrix the capture encoders use.
-fn rgb_to_ycbcr(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+pub(crate) fn rgb_to_ycbcr(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (
         16.0 + 0.256_788 * r + 0.504_129 * g + 0.097_906 * b,
         128.0 - 0.148_223 * r - 0.290_993 * g + 0.439_216 * b,
@@ -949,6 +973,7 @@ mod tests {
             cuts: Vec::new(),
             aspect: Aspect::Original,
             format: ExportFormat::Mp4,
+            webcam: None,
         }
     }
 

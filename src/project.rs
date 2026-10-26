@@ -24,6 +24,7 @@ pub struct Project {
 }
 
 const CAPTURE: &str = "capture.mp4";
+const WEBCAM: &str = "webcam.mkv";
 const JOB: &str = "project.json";
 
 fn root() -> PathBuf {
@@ -46,6 +47,9 @@ fn dir_for(output: &Path) -> Option<PathBuf> {
 pub fn keep(job: &RenderJob, zoomable: bool) {
     if !enabled() || keep_in(&root(), job, zoomable).is_err() {
         let _ = std::fs::remove_file(&job.capture);
+        if let Some(cam) = &job.webcam {
+            let _ = std::fs::remove_file(&cam.path);
+        }
     }
     prune(&root(), KEEP, MAX_BYTES);
 }
@@ -58,9 +62,20 @@ fn keep_in(root: &Path, job: &RenderJob, zoomable: bool) -> Result<()> {
     std::fs::rename(&job.capture, dir.join(CAPTURE))?;
     let mut saved = job.clone();
     saved.capture = PathBuf::from(CAPTURE);
+    if let Some(cam) = &mut saved.webcam {
+        if std::fs::rename(&cam.path, dir.join(WEBCAM)).is_ok() {
+            cam.path = PathBuf::from(WEBCAM);
+        } else {
+            let _ = std::fs::remove_file(&cam.path);
+            saved.webcam = None;
+        }
+    }
     // JSON has no infinity; a cut to the end becomes one far past it.
     for cut in &mut saved.cuts {
         cut.1 = cut.1.min(1e9);
+    }
+    for span in saved.webcam.iter_mut().flat_map(|c| c.clock.iter_mut()) {
+        span.last = span.last.min(1e9);
     }
     std::fs::write(dir.join(JOB), serde_json::to_vec(&Project { job: saved, zoomable })?)?;
     Ok(())
@@ -78,6 +93,12 @@ fn find_in(dir: &Path, output: &Path) -> Option<Project> {
         return None;
     }
     project.job.capture = capture;
+    if let Some(cam) = &mut project.job.webcam {
+        cam.path = dir.join(WEBCAM);
+    }
+    if project.job.webcam.as_ref().is_some_and(|c| !c.path.is_file()) {
+        project.job.webcam = None;
+    }
     Some(project)
 }
 
@@ -89,7 +110,10 @@ fn prune(root: &Path, keep: usize, max_bytes: u64) {
         .filter(|e| e.path().is_dir())
         .map(|e| {
             let path = e.path();
-            let size = std::fs::metadata(path.join(CAPTURE)).map_or(0, |m| m.len());
+            let size = [CAPTURE, WEBCAM]
+                .iter()
+                .map(|f| std::fs::metadata(path.join(f)).map_or(0, |m| m.len()))
+                .sum();
             let time = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
             (time, size, path)
         })
@@ -125,6 +149,7 @@ mod tests {
             cuts: vec![(0.0, 3.0), (9.0, f64::INFINITY)],
             aspect: Aspect::Original,
             format: ExportFormat::Mp4,
+            webcam: None,
         }
     }
 
