@@ -881,12 +881,10 @@ button.lens-pill, button.lens-pill-zoomed { font-size: 11.5px; }
 }
 "#;
 
-/// A symbolic icon from the bundled set (`assets/icons`), recolored by GTK
-/// to the widget's text color.
+/// An icon from the bundled set (`assets/icons`) in the widget's text
+/// color; see `symbolic_icon`.
 pub(crate) fn icon(name: &str, size: i32) -> Image {
-    let image = Image::from_icon_name(&format!("hgsr-{name}-symbolic"));
-    image.set_pixel_size(size);
-    image
+    crate::symbolic_icon::image(name, size)
 }
 
 /// A button showing an icon followed by `label` (or just the icon).
@@ -954,12 +952,12 @@ pub(crate) fn save_widget_png(widget: &impl IsA<gtk4::Widget>, window: &impl IsA
 fn sync_pause_button(button: &Button, image: &Image, paused: bool) {
     let shortcut = crate::shortcuts::PAUSE_LABEL;
     if paused {
-        image.set_icon_name(Some("hgsr-play-symbolic"));
+        crate::symbolic_icon::set(image, "play");
         button.set_tooltip_text(Some(&format!("Continue recording ({shortcut})")));
         button.remove_css_class("pause-pill");
         button.add_css_class("pause-pill-on");
     } else {
-        image.set_icon_name(Some("hgsr-pause-symbolic"));
+        crate::symbolic_icon::set(image, "pause");
         button.set_tooltip_text(Some(&format!("Pause ({shortcut}); the pause is cut from the video")));
         button.remove_css_class("pause-pill-on");
         button.add_css_class("pause-pill");
@@ -1131,8 +1129,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     pause_btn.set_visible(false);
 
     // Instant replay: starts the buffer, then saves clips of the last seconds.
-    let replay_btn = icon_button("replay", "Replay");
-    replay_btn.add_css_class("studio-pill");
+    let replay_btn = icon_button("replay", "");
+    replay_btn.add_css_class("theme-pill");
     replay_btn.set_tooltip_text(Some("Start instant replay: keeps the last seconds so you can save them as a clip"));
     replay_btn.set_visible(state.lock().settings.replay_sec > 0);
     let clip_btn = icon_button("replay", "Save clip");
@@ -1147,8 +1145,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     replay_stop_btn.set_visible(false);
 
     // Opens the editor on the latest recording.
-    let edit_btn = icon_button("trim", "Edit");
-    edit_btn.add_css_class("studio-pill");
+    let edit_btn = icon_button("trim", "");
+    edit_btn.add_css_class("theme-pill");
     edit_btn.set_tooltip_text(Some("Trim the latest recording, or export it vertical, square, WebM, or GIF"));
     edit_btn.set_visible(latest_recording(&state.lock().videos_dir).is_some());
 
