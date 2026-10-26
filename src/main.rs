@@ -19,6 +19,7 @@ pub mod shortcuts;
 pub mod state;
 pub mod studio_panel;
 pub mod studio_render;
+pub mod symbolic_icon;
 pub mod web_ui;
 pub mod webcam;
 pub mod x11_above;
