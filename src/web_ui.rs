@@ -130,7 +130,7 @@ async fn post_manual_zoom(
         payload.hold_ms.unwrap_or(2400),
     );
     g.cursor_tracker.push_keystroke(
-        &format!("Zoom {:.1}x @ ({:.2}, {:.2})", payload.zoom, payload.x, payload.y),
+        format!("Zoom {:.1}x @ ({:.2}, {:.2})", payload.zoom, payload.x, payload.y),
         now,
     );
     g.tick();

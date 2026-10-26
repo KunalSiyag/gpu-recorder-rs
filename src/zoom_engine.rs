@@ -28,8 +28,10 @@ impl AutoZoomMode {
 /// User-selectable or self-registered combination (mouse operation, modifier+click, gesture, or key)
 /// that triggers or toggles zoom on demand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ZoomComboBinding {
     /// Default: Quick Cursor Shake (⇄ wiggle) OR Middle-Click (Mouse 2) — works across all Wayland & X11 windows!
+    #[default]
     ShakeOrMiddleClick,
     /// Middle Mouse Button (Wheel Click / Mouse 2)
     MiddleClick,
@@ -58,11 +60,6 @@ pub enum ZoomComboBinding {
     },
 }
 
-impl Default for ZoomComboBinding {
-    fn default() -> Self {
-        ZoomComboBinding::ShakeOrMiddleClick
-    }
-}
 
 impl ZoomComboBinding {
     pub fn short_label(&self) -> String {
@@ -130,8 +127,10 @@ impl ZoomComboBinding {
 
 /// How the zoom combo behaves when triggered by the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ComboActionMode {
     /// Trigger once to lock zoom IN (follows cursor smoothly as long as you want); trigger again to return to 1.0x
+    #[default]
     ToggleLock,
     /// Stay zoomed in while holding the combo; smoothly return to 1.0x on release
     HoldToZoom,
@@ -139,11 +138,6 @@ pub enum ComboActionMode {
     StepCycle,
 }
 
-impl Default for ComboActionMode {
-    fn default() -> Self {
-        ComboActionMode::ToggleLock
-    }
-}
 
 impl ComboActionMode {
     pub fn label(&self) -> &'static str {
@@ -262,6 +256,12 @@ pub struct ZoomEngine {
     pub manual_zoom_level: f32,
     prev_combo_active: bool,
     hold_impulse_until_ms: u64,
+}
+
+impl Default for ZoomEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ZoomEngine {

@@ -760,7 +760,7 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
         shadow_btn.connect_clicked(move |btn| {
             update(&st, |s| s.background.shadow = !s.background.shadow);
             let on = st.lock().settings.background.shadow;
-            set_btn_text(&btn, if on { "● Shadow" } else { "○ Shadow" });
+            set_btn_text(btn, if on { "● Shadow" } else { "○ Shadow" });
             btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
             btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
         });

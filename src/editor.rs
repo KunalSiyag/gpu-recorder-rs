@@ -178,9 +178,11 @@ impl Model {
     }
 }
 
-/// Frames for the timeline, `count` evenly spaced, `h` pixels tall, as
-/// BGRx rows.
-fn thumbnails(file: &Path, duration: f64, size: (usize, usize), count: usize, h: usize) -> Vec<(usize, usize, Vec<u8>)> {
+/// Timeline frames: width, height, and BGRx rows.
+type Thumbnails = Vec<(usize, usize, Vec<u8>)>;
+
+/// Frames for the timeline, `count` evenly spaced, `h` pixels tall.
+fn thumbnails(file: &Path, duration: f64, size: (usize, usize), count: usize, h: usize) -> Thumbnails {
     use rayon::prelude::*;
     let w = ((h * size.0 / size.1.max(1)) / 2 * 2).max(2);
     (0..count)
@@ -561,7 +563,7 @@ pub fn open(app: &Application, file: &Path) {
     window.set_child(Some(&root));
 
     // Thumbnails load in the background.
-    let thumbs_slot: Arc<parking_lot::Mutex<Option<Vec<(usize, usize, Vec<u8>)>>>> = Default::default();
+    let thumbs_slot: Arc<parking_lot::Mutex<Option<Thumbnails>>> = Default::default();
     {
         let slot = thumbs_slot.clone();
         let (file, size) = (file.to_path_buf(), (info.width, info.height));

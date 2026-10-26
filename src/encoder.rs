@@ -588,6 +588,7 @@ impl ActiveEncoderSession {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_zoom_telemetry(
         &mut self,
         t_sec: f32,
@@ -644,25 +645,23 @@ impl ActiveEncoderSession {
     pub fn write_frame(&mut self, frame: &FrameBuffer) -> Result<()> {
         if let RecordingEngineKind::FfmpegPipe {
             ref mut child,
-            ref mut stdin,
+            stdin: Some(ref mut pipe),
         } = self.kind
         {
-            if let Some(ref mut pipe) = stdin {
-                if pipe.write_all(&frame.data).is_err() {
-                    let _ = child.wait();
-                    let mut fallback = Self::start(
-                        &self.output_path,
-                        self.width,
-                        self.height,
-                        self.fps,
-                        HardwareEncoderBackend::SoftwareX264Fast,
-                    )?;
-                    fallback.write_frame(frame)?;
-                    *self = fallback;
-                    return Ok(());
-                }
-                self.frames_written += 1;
+            if pipe.write_all(&frame.data).is_err() {
+                let _ = child.wait();
+                let mut fallback = Self::start(
+                    &self.output_path,
+                    self.width,
+                    self.height,
+                    self.fps,
+                    HardwareEncoderBackend::SoftwareX264Fast,
+                )?;
+                fallback.write_frame(frame)?;
+                *self = fallback;
+                return Ok(());
             }
+            self.frames_written += 1;
         }
         Ok(())
     }
@@ -847,8 +846,8 @@ pub fn build_smooth_60fps_camera_frames(
                 .map(|n| n.timestamp_sec)
                 .unwrap_or(ev.timestamp_sec + 0.02);
             let end_idx = ((next_t * 60.0).ceil() as usize).min(total_frames.saturating_sub(1));
-            for m_f in idx..=end_idx {
-                rec_manual[m_f] = true;
+            if idx <= end_idx {
+                rec_manual[idx..=end_idx].fill(true);
             }
         }
     }
@@ -923,9 +922,7 @@ pub fn build_smooth_60fps_camera_frames(
         // 3. Glide-and-settle to a new UI region (settle for 16 frames = 260ms after traveling)
         let settle_trigger = traveled_since_last && settle_counter == 16;
 
-        if cooldown_remaining > 0 {
-            cooldown_remaining -= 1;
-        }
+        cooldown_remaining = cooldown_remaining.saturating_sub(1);
 
         if (rec_click[f] || rec_rising_edge || settle_trigger) && cooldown_remaining == 0 && hold_remaining == 0 {
             hold_remaining = 105; // 1.75 seconds hold at 60fps
@@ -1060,6 +1057,7 @@ fn sample_trajectory(events: &[RecordedZoomEvent], t_sec: f32) -> (f32, f32, f32
 
 /// Renders a complete, self-contained Studio Demo MP4 showcasing cursor smoothing,
 /// click ripples, and spring-physics automatic zoom-ins.
+#[allow(clippy::too_many_arguments)]
 pub fn export_showcase_recording(
     output_path: impl AsRef<Path>,
     width: usize,
