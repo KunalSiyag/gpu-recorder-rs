@@ -482,6 +482,36 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     countdown_track.set_hexpand(true);
     countdown_track.set_tooltip_text(Some("Counts down on the island once the screen share is running"));
     countdown_row.append(&countdown_track);
+    let hide_label = |on: bool| if on { "● Hide bar" } else { "○ Hide bar" };
+    let hide_btn = Button::with_label(hide_label(settings.hide_while_recording));
+    hide_btn.add_css_class(if settings.hide_while_recording { "toggle-chip-on" } else { "toggle-chip" });
+    hide_btn.set_tooltip_text(Some(&format!(
+        "Hides this bar while recording so it is not in the video. {} stops and {} pauses \
+         (the bar comes back while paused), or use the notification's buttons",
+        crate::shortcuts::DEFAULT_LABEL,
+        crate::shortcuts::PAUSE_LABEL
+    )));
+    {
+        let st = state.clone();
+        let footer = footer.clone();
+        hide_btn.connect_clicked(move |btn| {
+            update(&st, |s| s.hide_while_recording = !s.hide_while_recording);
+            let on = st.lock().settings.hide_while_recording;
+            set_btn_text(btn, hide_label(on));
+            btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
+            btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
+            footer.set_text(&if on {
+                format!(
+                    "✓ The bar hides while recording; {} stops, {} pauses",
+                    crate::shortcuts::DEFAULT_LABEL,
+                    crate::shortcuts::PAUSE_LABEL
+                )
+            } else {
+                "○ The bar stays on screen while recording".to_string()
+            });
+        });
+    }
+    countdown_row.append(&hide_btn);
     rec_card.append(&countdown_row);
 
     // Start/stop and pause from anywhere with desktop keybindings.

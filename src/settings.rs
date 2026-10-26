@@ -209,6 +209,8 @@ pub struct RecorderSettings {
     pub webcam: Webcam,
     /// Bubble diameter as a fraction of the video's shorter side.
     pub webcam_size: f32,
+    /// Hide the island while recording, so it is not in the video.
+    pub hide_while_recording: bool,
 }
 
 impl Default for RecorderSettings {
@@ -229,6 +231,7 @@ impl Default for RecorderSettings {
             clean_mic: true,
             webcam: Webcam::Off,
             webcam_size: 0.24,
+            hide_while_recording: false,
         }
     }
 }
