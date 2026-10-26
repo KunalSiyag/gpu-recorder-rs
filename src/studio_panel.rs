@@ -399,20 +399,51 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     cursor_row.append(&ripple_btn);
     rec_card.append(&cursor_row);
 
-    // Start/stop from anywhere with a desktop keybinding.
+    // A countdown on the running capture, cut from the video afterwards.
+    let countdown_row = GtkBox::new(Orientation::Horizontal, 6);
+    countdown_row.append(&crate::gui::icon("timer", 14));
+    let countdown_idx = match settings.countdown_sec {
+        0 => 0,
+        1..=3 => 1,
+        _ => 2,
+    };
+    let (countdown_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["No countdown", "3 s", "5 s"], countdown_idx, move |i| {
+            let sec = [0, 3, 5][i];
+            update(&st, |s| s.countdown_sec = sec);
+            footer.set_text(&if sec == 0 {
+                "○ Recording starts at once".to_string()
+            } else {
+                format!("✓ Recording starts after a {sec}-second countdown; press Stop during it to cancel")
+            });
+        })
+    };
+    countdown_track.set_hexpand(true);
+    countdown_track.set_tooltip_text(Some("Counts down on the island once the screen share is running"));
+    countdown_row.append(&countdown_track);
+    rec_card.append(&countdown_row);
+
+    // Start/stop and pause from anywhere with desktop keybindings.
     let shortcut_row = GtkBox::new(Orientation::Horizontal, 6);
     shortcut_row.append(&crate::gui::icon("shortcut", 14));
-    let shortcut_lbl = Label::new(Some(&format!("Start / stop  {}", crate::shortcuts::DEFAULT_LABEL)));
+    let shortcut_lbl = Label::new(Some(&format!(
+        "Record {}  ·  Pause {}",
+        crate::shortcuts::DEFAULT_LABEL,
+        crate::shortcuts::PAUSE_LABEL
+    )));
     shortcut_lbl.add_css_class("panel-hint");
     shortcut_lbl.set_hexpand(true);
     shortcut_lbl.set_halign(Align::Start);
     shortcut_row.append(&shortcut_lbl);
-    let ready = crate::shortcuts::installed();
+    let ready = crate::shortcuts::all_installed();
     let shortcut_btn = icon_button(if ready { "check" } else { "keyboard" }, if ready { "Ready" } else { "Set up" });
     shortcut_btn.add_css_class(if ready { "toggle-chip-on" } else { "action-chip" });
     shortcut_btn.set_tooltip_text(Some(&format!(
-        "Adds {} to your desktop shortcuts. It runs: {}",
+        "Adds {} (start / stop) and {} (pause) to your desktop shortcuts. Start / stop runs: {}",
         crate::shortcuts::DEFAULT_LABEL,
+        crate::shortcuts::PAUSE_LABEL,
         crate::shortcuts::toggle_command()
     )));
     {

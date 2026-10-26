@@ -76,6 +76,15 @@ pub struct StudioState {
     parts_elapsed_sec: f32,
     /// The file the joined recording is captured to, and how.
     capture_target: Option<(PathBuf, CaptureOptions)>,
+    /// Video-time ranges of the running part to leave out: the countdown
+    /// and finished pauses.
+    part_cuts: Vec<(f64, f64)>,
+    /// Video time of the running part when Pause was pressed.
+    paused_at: Option<f64>,
+    /// Seconds to count down once the first part is running.
+    countdown_pending: u32,
+    /// When the countdown ends.
+    countdown_end: Option<Instant>,
     /// Lazy-allocated buffers used ONLY when `--web` requests a rendered JPEG frame
     lazy_web_buffers: Option<(ScreenCapturer, FrameBuffer, FrameBuffer)>,
 }
@@ -125,6 +134,10 @@ impl StudioState {
             capture_paused: None,
             parts_elapsed_sec: 0.0,
             capture_target: None,
+            part_cuts: Vec::new(),
+            paused_at: None,
+            countdown_pending: 0,
+            countdown_end: None,
             lazy_web_buffers: None,
         }
     }
@@ -133,12 +146,68 @@ impl StudioState {
         self.start_instant.elapsed().as_millis() as u64
     }
 
+    /// Recorded time that will be in the video: the countdown and pauses
+    /// do not count.
     pub fn recording_elapsed_sec(&self) -> f32 {
-        self.parts_elapsed_sec
-            + self
-                .recording_start
-                .map(|t| t.elapsed().as_secs_f32())
-                .unwrap_or(0.0)
+        let live = self.live_video_sec().map_or(0.0, |t| (t - self.cut_sec(t)).max(0.0));
+        self.parts_elapsed_sec + live as f32
+    }
+
+    /// Video time of the running part, once its first frame is captured.
+    fn live_video_sec(&self) -> Option<f64> {
+        self.recording_start.map(|t| t.elapsed().as_secs_f64())
+    }
+
+    /// How much of the running part's first `upto` seconds is cut.
+    fn cut_sec(&self, upto: f64) -> f64 {
+        cut_total(&self.part_cuts, upto) + self.paused_at.map_or(0.0, |p| (upto - p).max(0.0))
+    }
+
+    /// Seconds left before recording starts for real, while counting down.
+    pub fn countdown_left(&self) -> Option<f32> {
+        self.encoder_session.as_ref()?;
+        let left = self.countdown_end?.saturating_duration_since(Instant::now()).as_secs_f32();
+        (left > 0.0).then_some(left)
+    }
+
+    /// Paused with the Pause button (the capture keeps running; the paused
+    /// time is cut from the video).
+    pub fn is_paused_by_user(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Pauses or continues the running recording, and returns whether it is
+    /// paused now. Does nothing before the countdown is over.
+    pub fn toggle_pause(&mut self) -> bool {
+        let Some(t) = self.live_video_sec() else {
+            return false;
+        };
+        if self.encoder_session.is_none() || self.countdown_left().is_some() {
+            return self.paused_at.is_some();
+        }
+        let now = self.now_ms();
+        match self.paused_at.take() {
+            Some(from) => {
+                self.part_cuts.push((from, t));
+                self.cursor_tracker.push_keystroke("● REC Continued", now);
+                false
+            }
+            None => {
+                self.paused_at = Some(t);
+                self.cursor_tracker.push_keystroke("⏸ Paused", now);
+                true
+            }
+        }
+    }
+
+    /// The running part's cuts, with an open pause running to its end.
+    fn take_part_cuts(&mut self) -> Vec<(f64, f64)> {
+        let mut cuts = std::mem::take(&mut self.part_cuts);
+        if let Some(from) = self.paused_at.take() {
+            cuts.push((from, f64::INFINITY));
+        }
+        self.countdown_end = None;
+        cuts
     }
 
     /// A recording is running, possibly paused after a broken screen share.
@@ -225,6 +294,13 @@ impl StudioState {
         // after Record while the portal starts; telemetry waits for it.
         if self.recording_start.is_none() {
             self.recording_start = self.encoder_session.as_ref().and_then(|s| s.ready_at());
+            // The countdown runs on a live capture, so recording starts the
+            // moment it ends; the counted seconds are cut from the video.
+            if let (Some(start), n @ 1..) = (self.recording_start, self.countdown_pending) {
+                self.countdown_pending = 0;
+                self.countdown_end = Some(start + std::time::Duration::from_secs(u64::from(n)));
+                self.part_cuts.push((0.0, f64::from(n)));
+            }
         }
         let Some(rec_start) = self.recording_start else {
             return;
@@ -383,6 +459,10 @@ impl StudioState {
         self.recorded_parts.clear();
         self.capture_paused = None;
         self.parts_elapsed_sec = 0.0;
+        self.part_cuts.clear();
+        self.paused_at = None;
+        self.countdown_end = None;
+        self.countdown_pending = settings.countdown_sec;
         self.capture_target = Some((capture_path.clone(), CaptureOptions { repick: false, ..options }));
         self.cursor_tracker
             .push_keystroke("● REC Started (Zero-Copy GPU)", self.now_ms());
@@ -438,9 +518,13 @@ impl StudioState {
         let Some(session) = self.encoder_session.take() else {
             return;
         };
-        let live_sec = self.recording_start.take().map(|t| t.elapsed().as_secs_f64());
-        let done = session.finish_capture();
-        self.parts_elapsed_sec += done.keep_sec.or(live_sec).unwrap_or(0.0) as f32;
+        let live_sec = self.live_video_sec();
+        let cuts = self.take_part_cuts();
+        self.recording_start = None;
+        let mut done = session.finish_capture();
+        let kept = done.keep_sec.or(live_sec).unwrap_or(0.0);
+        self.parts_elapsed_sec += (kept - cut_total(&cuts, kept)).max(0.0) as f32;
+        done.cuts = cuts;
         self.recorded_parts.push(done);
     }
 
@@ -450,6 +534,8 @@ impl StudioState {
         if !self.is_recording() {
             return None;
         }
+        let live_cuts = self.take_part_cuts();
+        self.countdown_pending = 0;
         let session = self.encoder_session.take();
         let parts = std::mem::take(&mut self.recorded_parts);
         let capture = self
@@ -475,6 +561,7 @@ impl StudioState {
         Some(StopJob {
             parts,
             session,
+            live_cuts,
             capture,
             auto_zoom: self.auto_apply_zoom_on_stop && settings.auto_zoom,
             settings,
@@ -540,6 +627,8 @@ pub struct StopJob {
     /// Earlier parts of a recording whose screen share broke.
     parts: Vec<FinishedCapture>,
     session: Option<ActiveEncoderSession>,
+    /// Cuts of the running part.
+    live_cuts: Vec<(f64, f64)>,
     /// Where the whole recording's capture goes.
     capture: PathBuf,
     auto_zoom: bool,
@@ -553,7 +642,9 @@ impl StopJob {
     pub fn complete(self, progress: &AtomicU32) -> Result<PathBuf> {
         let mut parts = self.parts;
         if let Some(session) = self.session {
-            parts.push(session.finish_capture());
+            let mut live = session.finish_capture();
+            live.cuts = self.live_cuts;
+            parts.push(live);
         }
         let done = join_parts(parts, &self.capture)?;
         let capture = done.path;
@@ -586,7 +677,7 @@ impl StopJob {
                 && (self.settings.source != CaptureSource::Window || cursor.is_some()),
             cursor,
             cursor_scale: self.settings.cursor_scale,
-            cuts: Vec::new(),
+            cuts: done.cuts,
             aspect: Default::default(),
             format: Default::default(),
         };
@@ -605,6 +696,19 @@ impl StopJob {
                 let _ = std::fs::remove_file(&output);
                 Ok(std::fs::rename(&capture, &output).map_or(capture, |_| output))
             }
+        }
+    }
+
+    /// Stops the capture and deletes everything it wrote (a recording
+    /// cancelled during its countdown).
+    pub fn discard(self) {
+        let mut paths: Vec<PathBuf> = self.parts.into_iter().map(|p| p.path).collect();
+        if let Some(session) = self.session {
+            paths.push(session.finish_capture().path);
+        }
+        paths.push(self.capture);
+        for path in paths {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -715,10 +819,12 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
         return Ok(first);
     }
     let mut cursor: Option<crate::cursor_track::CursorTrack> = None;
+    let mut cuts = Vec::new();
     for ((shift, last), part) in part_shifts(&spans).into_iter().zip(parts.iter_mut()) {
         if let Some(track) = part.cursor.take() {
             cursor.get_or_insert_with(Default::default).append_shifted(track, shift, last);
         }
+        cuts.extend(shift_cuts(&part.cuts, shift, last));
     }
     let paired: Vec<_> = spans
         .into_iter()
@@ -733,7 +839,22 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
         error: last_error,
         keep_sec: None,
         cursor,
+        cuts,
     })
+}
+
+/// How much of the first `upto` seconds `cuts` leave out.
+fn cut_total(cuts: &[(f64, f64)], upto: f64) -> f64 {
+    cuts.iter().map(|&(a, b)| (b.min(upto) - a).max(0.0)).sum()
+}
+
+/// Moves a part's cuts onto the joined timeline, dropping what lies past
+/// the part's kept end.
+fn shift_cuts(cuts: &[(f64, f64)], shift: f64, last: f64) -> Vec<(f64, f64)> {
+    cuts.iter()
+        .filter(|(a, _)| *a < last)
+        .map(|&(a, b)| (shift + a, shift + b.min(last)))
+        .collect()
 }
 
 /// `HyperGSR_<time>.capture.mp4` becomes `HyperGSR_<time>.mp4`.
@@ -807,6 +928,18 @@ mod tests {
         for (t, want) in times.iter().zip(expected) {
             assert!((t - want).abs() < 1e-3, "{times:?}");
         }
+    }
+
+    #[test]
+    fn part_cuts_follow_the_joined_timeline() {
+        let spans = [PartSpan { video_start: 0.2, kept: 65.1 }, PartSpan { video_start: 0.1, kept: 10.0 }];
+        let shifts = part_shifts(&spans);
+        // A countdown in the first part; a pause left open in the second.
+        assert_eq!(shift_cuts(&[(0.0, 3.0)], shifts[0].0, shifts[0].1), vec![(0.0, 3.0)]);
+        let (shift, last) = shifts[1];
+        let cut = shift_cuts(&[(4.0, f64::INFINITY), (20.0, 30.0)], shift, last);
+        assert_eq!(cut.len(), 1);
+        assert!((cut[0].0 - 69.0).abs() < 1e-9 && (cut[0].1 - 74.9).abs() < 1e-9, "{cut:?}");
     }
 
     #[test]

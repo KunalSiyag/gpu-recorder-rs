@@ -191,6 +191,9 @@ pub struct RecorderSettings {
     pub background: BackgroundSettings,
     /// Where recordings are saved; `None` means `~/Videos`.
     pub save_dir: Option<PathBuf>,
+    /// Seconds counted down once the screen share is running, left out of
+    /// the video; 0 starts at once.
+    pub countdown_sec: u32,
 }
 
 impl Default for RecorderSettings {
@@ -207,6 +210,7 @@ impl Default for RecorderSettings {
             auto_zoom: true,
             background: BackgroundSettings::default(),
             save_dir: None,
+            countdown_sec: 3,
         }
     }
 }
@@ -240,6 +244,7 @@ impl RecorderSettings {
 
     fn sanitized(mut self) -> Self {
         self.fps = if self.fps <= 30 { 30 } else { 60 };
+        self.countdown_sec = self.countdown_sec.min(10);
         self.cursor_scale = if self.cursor_scale.is_finite() { self.cursor_scale.clamp(1.0, 2.0) } else { 1.0 };
         self.region = self.region.and_then(Region::normalized);
         // A folder that was removed or unmounted falls back to ~/Videos.

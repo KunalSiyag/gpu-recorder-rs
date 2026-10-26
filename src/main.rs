@@ -77,8 +77,8 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     // Bound to a desktop shortcut: start or stop the running recorder.
-    if args.iter().any(|a| a == "--toggle-recording") {
-        return shortcuts::toggle_running_recorder();
+    if let Some(flag) = args.iter().find(|a| *a == "--toggle-recording" || *a == "--pause-recording") {
+        return shortcuts::activate_running_recorder(flag);
     }
 
     // Ensure GTK4 initializes on native Wayland with libgtk4-layer-shell preloaded
@@ -127,6 +127,14 @@ fn main() -> anyhow::Result<()> {
             .get(idx + 1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(3.0);
+        // --pause <at>:<seconds> pauses once, for testing.
+        let pause: Option<(f32, f32)> = args
+            .iter()
+            .position(|a| a == "--pause")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.split_once(':'))
+            .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
+        let mut paused_since: Option<std::time::Instant> = None;
         print_banner(&state);
         let out_path = state.lock().start_recording()?;
         println!(
@@ -148,7 +156,17 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("⚠ Screen sharing was interrupted ({reason}); saving what was recorded");
                 break;
             }
-            let elapsed = g.recording_start.map(|t| t.elapsed().as_secs_f32());
+            // Recorded time, after the countdown and without pauses.
+            let elapsed = g.recording_start.map(|_| g.recording_elapsed_sec());
+            if let (Some(e), Some((at, len))) = (elapsed, pause) {
+                if !g.is_paused_by_user() && e >= at && paused_since.is_none() {
+                    g.toggle_pause();
+                    paused_since = Some(std::time::Instant::now());
+                }
+                if paused_since.is_some_and(|t| t.elapsed().as_secs_f32() >= len) && g.is_paused_by_user() {
+                    g.toggle_pause();
+                }
+            }
             drop(g);
             if elapsed.is_some_and(|e| e >= secs) {
                 break;

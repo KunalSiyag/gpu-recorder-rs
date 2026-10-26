@@ -793,6 +793,20 @@ button.seg-btn:hover image { opacity: 1; }
 .island-shell-rec { border-color: rgba(244, 63, 94, 0.6); }
 .island-title { font-weight: 650; letter-spacing: -0.15px; }
 .island-timer-rec { font-weight: 650; letter-spacing: 0.2px; }
+.island-countdown { color: #fbbf24; }
+.theme-light .island-countdown { color: #b45309; }
+button.pause-pill { padding: 4px 8px; }
+button.pause-pill-on {
+    padding: 4px 8px;
+    background-color: rgba(251, 191, 36, 0.18);
+    border-color: rgba(251, 191, 36, 0.6);
+    color: #fde68a;
+}
+.theme-light button.pause-pill-on {
+    background-color: rgba(245, 158, 11, 0.14);
+    border-color: rgba(217, 119, 6, 0.55);
+    color: #92400e;
+}
 .section-cap { font-size: 9px; font-weight: 650; letter-spacing: 0.9px; }
 .panel-hint { font-weight: 500; }
 
@@ -901,6 +915,22 @@ pub(crate) fn set_btn_text(button: &Button, text: &str) {
     match label {
         Some(label) => label.set_text(text),
         None => button.set_label(text),
+    }
+}
+
+/// Shows Pause, or Continue while paused.
+fn sync_pause_button(button: &Button, image: &Image, paused: bool) {
+    let shortcut = crate::shortcuts::PAUSE_LABEL;
+    if paused {
+        image.set_icon_name(Some("hgsr-play-symbolic"));
+        button.set_tooltip_text(Some(&format!("Continue recording ({shortcut})")));
+        button.remove_css_class("pause-pill");
+        button.add_css_class("pause-pill-on");
+    } else {
+        image.set_icon_name(Some("hgsr-pause-symbolic"));
+        button.set_tooltip_text(Some(&format!("Pause ({shortcut}); the pause is cut from the video")));
+        button.remove_css_class("pause-pill-on");
+        button.add_css_class("pause-pill");
     }
 }
 
@@ -1060,6 +1090,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     resume_btn.add_css_class("shutter-rec");
     resume_btn.set_visible(false);
 
+    // Pauses the running recording; the paused time is cut from the video.
+    let pause_btn = Button::new();
+    let pause_icon = icon("pause", 14);
+    pause_btn.set_child(Some(&pause_icon));
+    pause_btn.add_css_class("pause-pill");
+    pause_btn.set_tooltip_text(Some(&format!("Pause ({})", crate::shortcuts::PAUSE_LABEL)));
+    pause_btn.set_visible(false);
+
     // 4. Quick Dark / Light Theme Pill
     let theme_btn = Button::new();
     theme_btn.add_css_class("theme-pill");
@@ -1093,6 +1131,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     top_row.append(&zoom_pill_btn);
     top_row.append(&top_spacer);
     top_row.append(&resume_btn);
+    top_row.append(&pause_btn);
     top_row.append(&rec_btn);
     top_row.append(&theme_btn);
     top_row.append(&expand_btn);
@@ -2250,6 +2289,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 footer.set_text("Still saving the last recording…");
                 return;
             }
+            if st.lock().countdown_left().is_some() {
+                // Stopping before the countdown ends cancels the recording.
+                let Some(job) = st.lock().take_recording() else { return };
+                show_recording(false);
+                s_lbl.remove_css_class("island-countdown");
+                s_lbl.set_text("HyperGSR");
+                footer.set_text("Recording cancelled");
+                std::thread::spawn(move || job.discard());
+                return;
+            }
             if st.lock().is_recording() {
                 stop_and_save(None);
                 return;
@@ -2285,11 +2334,29 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         });
     }
 
-    // `hypergsr --toggle-recording` (the desktop shortcut) lands here.
+    {
+        let st = state.clone();
+        let pause_icon = pause_icon.clone();
+        pause_btn.connect_clicked(move |btn| {
+            let paused = st.lock().toggle_pause();
+            sync_pause_button(btn, &pause_icon, paused);
+        });
+    }
+
+    // `hypergsr --toggle-recording` and `--pause-recording` (the desktop
+    // shortcuts) land here.
     {
         let action = gio::SimpleAction::new("toggle-record", None);
         let rec = rec_btn.clone();
         action.connect_activate(move |_, _| rec.emit_clicked());
+        app.add_action(&action);
+        let action = gio::SimpleAction::new("pause-record", None);
+        let pause = pause_btn.clone();
+        action.connect_activate(move |_, _| {
+            if pause.is_visible() {
+                pause.emit_clicked();
+            }
+        });
         app.add_action(&action);
     }
     if std::env::var("HYPERGSR_START_RECORDING").as_deref() == Ok("1") {
@@ -2395,6 +2462,9 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let rec_combo_b = record_combo_btn.clone();
         let preset_btns = combo_preset_btns.clone();
         let resume_b = resume_btn.clone();
+        let pause_b = pause_btn.clone();
+        let pause_icon = pause_icon.clone();
+        let mut last_pause_state = (false, false);
         let win = window.clone();
         let keep_on_screen = keep_island_on_screen.clone();
         let app_n = app.clone();
@@ -2430,6 +2500,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let is_rec = g.is_recording();
             let paused = g.capture_paused.clone();
             let elapsed = g.recording_elapsed_sec();
+            let countdown = g.countdown_left();
+            let user_paused = g.is_paused_by_user();
 
             // Check if user is in "Record Combo…" self-registration mode and performed a global gesture/button/key
             let mut learned_label: Option<String> = None;
@@ -2538,6 +2610,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 last_paused = paused.clone();
             }
 
+            let can_pause = is_rec && capture_live && paused.is_none() && countdown.is_none();
+            if (can_pause, user_paused) != last_pause_state {
+                pause_b.set_visible(can_pause);
+                sync_pause_button(&pause_b, &pause_icon, user_paused);
+                last_pause_state = (can_pause, user_paused);
+                win.set_default_size(1, 1);
+            }
+
             if let Some(lbl) = learned_label {
                 for b in &preset_btns {
                     b.remove_css_class("seg-btn-active");
@@ -2614,7 +2694,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 was_zoomed = is_zoomed;
             }
 
-            if is_rec && paused.is_some() {
+            if let (true, Some(left)) = (is_rec, countdown) {
+                let new_s = format!("Recording in {}", left.ceil() as u32);
+                if new_s != last_s_str {
+                    s_lbl.set_text(&new_s);
+                    s_lbl.add_css_class("island-countdown");
+                    last_s_str = new_s;
+                }
+                wave.queue_draw();
+            } else if is_rec && (paused.is_some() || user_paused) {
+                s_lbl.remove_css_class("island-countdown");
                 let new_s = format!("⏸ Paused {:02}:{:02}", (elapsed as u64) / 60, (elapsed as u64) % 60);
                 if new_s != last_s_str {
                     s_lbl.set_text(&new_s);
@@ -2627,6 +2716,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 }
                 wave.queue_draw();
             } else if is_rec {
+                s_lbl.remove_css_class("island-countdown");
                 let mins = (elapsed as u64) / 60;
                 let secs = (elapsed as u64) % 60;
                 let tenths = ((elapsed * 10.0) as u64) % 10;
