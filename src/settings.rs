@@ -194,6 +194,8 @@ pub struct RecorderSettings {
     /// Seconds counted down once the screen share is running, left out of
     /// the video; 0 starts at once.
     pub countdown_sec: u32,
+    /// Filter background noise out of the microphone.
+    pub clean_mic: bool,
 }
 
 impl Default for RecorderSettings {
@@ -211,6 +213,7 @@ impl Default for RecorderSettings {
             background: BackgroundSettings::default(),
             save_dir: None,
             countdown_sec: 3,
+            clean_mic: true,
         }
     }
 }

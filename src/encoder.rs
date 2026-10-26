@@ -146,6 +146,8 @@ pub struct CaptureOptions {
     pub studio_cursor: bool,
     /// Ignore the remembered portal selection and show the picker again.
     pub repick: bool,
+    /// Filter noise out of the microphone.
+    pub clean_mic: bool,
 }
 
 /// Whether the screen-cast portal can send the cursor as metadata instead
@@ -278,6 +280,7 @@ impl ActiveEncoderSession {
             options.quality,
             options.fps,
             audio,
+            options.clean_mic,
             options.region,
             &out_path,
         ));
