@@ -208,7 +208,7 @@ pub struct WebcamFeed {
 
 impl WebcamFeed {
     pub fn open(clip: &WebcamClip, d: usize) -> Result<Self> {
-        if d < 2 || d % 2 != 0 {
+        if d < 2 || !d.is_multiple_of(2) {
             bail!("bad bubble size {d}");
         }
         let filter = format!(
@@ -381,7 +381,7 @@ mod tests {
         let mut frame = vec![16u8; w * h * 3 / 2];
         frame[w * h..].fill(128);
         let d = 20;
-        let rgba: Vec<u8> = std::iter::repeat([255u8, 0, 0, 255]).take(d * d).flatten().collect();
+        let rgba: Vec<u8> = std::iter::repeat_n([255u8, 0, 0, 255], d * d).flatten().collect();
         let c = clip(Vec::new());
         let (_, center) = WebcamClip { size: 20.0 / 48.0, ..c }.placement(w, h);
         draw_bubble_nv12(&mut frame, w, h, &rgba, d, center);

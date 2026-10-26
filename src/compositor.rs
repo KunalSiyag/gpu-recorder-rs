@@ -56,6 +56,7 @@ pub struct FrameCompositor;
 
 impl FrameCompositor {
     /// Single-pass frame composition with camera zoom, backdrop bezel, spotlight, trail, ripples, and cursor.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_frame(
         src: &FrameBuffer,
         viewport: &CameraViewport,

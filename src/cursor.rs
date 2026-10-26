@@ -676,6 +676,12 @@ impl Drop for X11CursorConn {
     }
 }
 
+impl Default for CursorTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CursorTracker {
     pub fn new() -> Self {
         let drm_cursor = DrmCursorReader::try_open();

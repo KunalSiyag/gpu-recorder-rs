@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(r.h, 608);
         assert_eq!(r.y, (1920 - 608) / 2);
         let padded = ContentRect::fit(1080, 1080, 1920, 1080, 0.05, 0.02);
-        assert!(padded.w <= 972 && padded.x >= 54 && padded.x % 2 == 0 && padded.y % 2 == 0);
+        assert!(padded.w <= 972 && padded.x >= 54 && padded.x.is_multiple_of(2) && padded.y.is_multiple_of(2));
         // Same shape: matches the plain inset.
         assert_eq!(ContentRect::fit(1920, 1080, 1920, 1080, 0.06, 0.0), ContentRect::framed(1920, 1080, 0.06, 0.0));
     }

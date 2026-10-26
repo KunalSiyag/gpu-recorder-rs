@@ -106,8 +106,10 @@ impl StudioState {
         let settings = RecorderSettings::load();
         let videos_dir = settings.recordings_dir();
         std::fs::create_dir_all(&videos_dir).ok();
-        let mut zoom_cfg = ZoomConfig::default();
-        zoom_cfg.enabled = settings.auto_zoom;
+        let zoom_cfg = ZoomConfig {
+            enabled: settings.auto_zoom,
+            ..Default::default()
+        };
 
         Self {
             start_instant: Instant::now(),

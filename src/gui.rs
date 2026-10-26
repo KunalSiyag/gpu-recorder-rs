@@ -183,6 +183,8 @@ pub(crate) fn layer_api() -> Option<&'static LayerApi> {
         if is_supported() == 0 {
             return None;
         }
+        // Each symbol is cast to the field's function type, as declared above.
+        #[allow(clippy::missing_transmute_annotations)]
         Some(LayerApi {
             init_for_window: std::mem::transmute(sym("gtk_layer_init_for_window")),
             set_layer: std::mem::transmute(sym("gtk_layer_set_layer")),
@@ -1430,10 +1432,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.tick();
             drop(g);
             if locked {
-                set_btn_text(&btn, "Unlock zoom");
+                set_btn_text(btn, "Unlock zoom");
                 f_lbl.set_text(&format!("Manual Zoom Locked at {target_z:.1}×"));
             } else {
-                set_btn_text(&btn, "Lock zoom");
+                set_btn_text(btn, "Lock zoom");
                 f_lbl.set_text("Manual Zoom Unlocked (1.0× Wide)");
             }
             r_area.queue_draw();
@@ -1760,12 +1762,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let now_learning = !learn_flag.load(Ordering::Relaxed);
             learn_flag.store(now_learning, Ordering::Relaxed);
             if now_learning {
-                set_btn_text(&btn, "● Press Key, Click, or Shake…");
+                set_btn_text(btn, "● Press Key, Click, or Shake…");
                 btn.add_css_class("action-chip");
                 f_lbl.set_text("Listening: Press any key/combo, Mid/Right-click, or Shake cursor!");
             } else {
                 let lbl = st.lock().zoom_cfg.combo_binding.short_label();
-                set_btn_text(&btn, &lbl);
+                set_btn_text(btn, &lbl);
                 f_lbl.set_text(&format!("✓ Zoom Combo: {lbl}"));
             }
         });
@@ -1926,7 +1928,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     key_name.to_uppercase()
                 };
                 parts.push(short_key);
-                let label = format!("{}", parts.join("+"));
+                let label = parts.join("+");
                 let new_binding = ZoomComboBinding::Custom {
                     ctrl,
                     alt,
@@ -1995,7 +1997,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             };
             let lbl = g.zoom_cfg.combo_action.label();
             drop(g);
-            set_btn_text(&btn, lbl);
+            set_btn_text(btn, lbl);
             f_lbl.set_text(&format!("✓ Combo Behavior: {lbl}"));
         });
     }
@@ -2167,12 +2169,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.settings.save();
             drop(g);
             if on {
-                set_btn_text(&btn, "● Auto-Zoom MP4: ON");
+                set_btn_text(btn, "● Auto-Zoom MP4: ON");
                 btn.remove_css_class("toggle-chip");
                 btn.add_css_class("toggle-chip-on");
                 f_lbl.set_text("✓ Auto-Zoom MP4 Post-Pass: ON");
             } else {
-                set_btn_text(&btn, "○ Auto-Zoom MP4: OFF");
+                set_btn_text(btn, "○ Auto-Zoom MP4: OFF");
                 btn.remove_css_class("toggle-chip-on");
                 btn.add_css_class("toggle-chip");
                 f_lbl.set_text("○ Auto-Zoom MP4 Post-Pass: OFF (Raw MP4)");
@@ -2225,11 +2227,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let keep_on_screen = keep_on_screen.clone();
             glib::timeout_add_local_once(Duration::from_millis(80), move || keep_on_screen());
             if expand {
-                set_btn_text(&btn, "Studio ▴");
+                set_btn_text(btn, "Studio ▴");
                 btn.remove_css_class("studio-pill");
                 btn.add_css_class("studio-pill-open");
             } else {
-                set_btn_text(&btn, "Studio ▾");
+                set_btn_text(btn, "Studio ▾");
                 btn.remove_css_class("studio-pill-open");
                 btn.add_css_class("studio-pill");
                 win.set_default_size(1, 1);
@@ -2671,7 +2673,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let Some(mut g) = st.try_lock() else {
                 return ControlFlow::Continue;
             };
-            if !hot && !g.is_recording() && idle_div % 4 != 0 {
+            if !hot && !g.is_recording() && !idle_div.is_multiple_of(4) {
                 return ControlFlow::Continue;
             }
             g.tick();
@@ -2754,7 +2756,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                         mouse_button: 0,
                         keycode: kc,
                         shake: false,
-                        label: format!("{}", parts.join("+")),
+                        label: parts.join("+"),
                     })
                 } else {
                     None
@@ -2886,7 +2888,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
             ui_div = ui_div.wrapping_add(1);
             // Throttle GTK label/canvas redraws to ~30Hz while keeping telemetry sampling at 60Hz
-            if ui_div % 2 != 0 {
+            if !ui_div.is_multiple_of(2) {
                 return ControlFlow::Continue;
             }
 
@@ -2922,7 +2924,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     }
                     Some(Err(err)) => {
                         s_lbl.set_text("Not saved");
-                        f_lbl.set_text(&format!("{err}"));
+                        f_lbl.set_text(&err);
                     }
                     None => s_lbl.set_text("HyperGSR"),
                 }

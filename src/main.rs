@@ -393,9 +393,11 @@ mod tests {
         let mut engine = ZoomEngine::new();
         let mut tracker = CursorTracker::new();
         let cur_cfg = CursorConfig::default();
-        let mut zoom_cfg = ZoomConfig::default();
-        zoom_cfg.mode = AutoZoomMode::ClickToZoom;
-        zoom_cfg.target_zoom = 2.25;
+        let zoom_cfg = ZoomConfig {
+            mode: AutoZoomMode::ClickToZoom,
+            target_zoom: 2.25,
+            ..Default::default()
+        };
 
         let (sample, clicked) = tracker.update(100, 0.25, 0.30, true, false, &cur_cfg);
         assert!(clicked);
@@ -494,20 +496,22 @@ mod tests {
         let mut engine = ZoomEngine::new();
         let mut tracker = CursorTracker::new();
         let cur_cfg = CursorConfig::default();
-        let mut zoom_cfg = ZoomConfig::default();
         // Configure user-registered custom combo: Ctrl + Right Click in ToggleLock mode
-        zoom_cfg.combo_binding = ZoomComboBinding::Custom {
-            ctrl: true,
-            alt: false,
-            shift: false,
-            super_key: false,
-            mouse_button: 3,
-            keycode: 0,
-            shake: false,
-            label: "⌃ Ctrl + Right-Click".to_string(),
+        let zoom_cfg = ZoomConfig {
+            combo_binding: ZoomComboBinding::Custom {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                super_key: false,
+                mouse_button: 3,
+                keycode: 0,
+                shake: false,
+                label: "⌃ Ctrl + Right-Click".to_string(),
+            },
+            combo_action: ComboActionMode::ToggleLock,
+            target_zoom: 2.40,
+            ..Default::default()
         };
-        zoom_cfg.combo_action = ComboActionMode::ToggleLock;
-        zoom_cfg.target_zoom = 2.40;
 
         // 1. Trigger the custom combo at t = 100ms
         let (s1, c1) = tracker.update_with_input(

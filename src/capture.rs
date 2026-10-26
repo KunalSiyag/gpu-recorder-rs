@@ -63,6 +63,7 @@ impl FrameBuffer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn fill_rect(
         &mut self,
         x0: usize,

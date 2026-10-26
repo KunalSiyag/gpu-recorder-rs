@@ -550,7 +550,7 @@ fn run_pipeline(
             if full_out_tx.send(output).is_err() {
                 break;
             }
-            if index % 15 == 0 {
+            if index.is_multiple_of(15) {
                 progress.store(((index * 990) / window.frames).min(990) as u32, Ordering::Relaxed);
             }
         }
@@ -807,9 +807,9 @@ impl Compositor {
     /// `canvas_rgb0` is the background from `render_canvas`. Sizes and the
     /// content rectangle must be even, as NV12 requires.
     pub fn new(w: usize, h: usize, src: (usize, usize), rect: ContentRect, canvas_rgb0: Vec<u8>) -> Self {
-        assert!(w % 2 == 0 && h % 2 == 0 && rect.x % 2 == 0 && rect.y % 2 == 0);
-        assert!(src.0 % 2 == 0 && src.1 % 2 == 0);
-        assert!(rect.w % 2 == 0 && rect.h % 2 == 0);
+        assert!(w.is_multiple_of(2) && h.is_multiple_of(2) && rect.x.is_multiple_of(2) && rect.y.is_multiple_of(2));
+        assert!(src.0.is_multiple_of(2) && src.1.is_multiple_of(2));
+        assert!(rect.w.is_multiple_of(2) && rect.h.is_multiple_of(2));
         let (canvas_y, canvas_uv) = canvas_to_nv12(&canvas_rgb0, w, h);
         let half = ContentRect {
             x: rect.x / 2,
@@ -924,7 +924,7 @@ mod tests {
         let src = frame(w, h, 200, 90, 160);
         let rect = ContentRect { x: 4, y: 2, w: 32, h: 16, radius: 4 };
         // Mid-grey canvas: Y = 126 for RGB 128.
-        let canvas: Vec<u8> = std::iter::repeat([128u8, 128, 128, 255]).take(w * h).flatten().collect();
+        let canvas: Vec<u8> = std::iter::repeat_n([128u8, 128, 128, 255], w * h).flatten().collect();
         let comp = Compositor::new(w, h, (w, h), rect, canvas);
         let mut dst = frame(w, h, 0, 0, 0);
         comp.compose(&src, &mut dst, (0.5, 0.5, 1.0));
@@ -1041,7 +1041,7 @@ mod tests {
         let (w, h) = (16, 32);
         let rect = ContentRect::fit(w, h, sw, sh, 0.0, 0.0);
         assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 12, 16, 8));
-        let canvas: Vec<u8> = std::iter::repeat([0u8, 0, 0, 255]).take(w * h).flatten().collect();
+        let canvas: Vec<u8> = std::iter::repeat_n([0u8, 0, 0, 255], w * h).flatten().collect();
         let comp = Compositor::new(w, h, (sw, sh), rect, canvas);
         let mut dst = frame(w, h, 0, 0, 0);
         comp.compose(&src, &mut dst, (0.5, 0.5, 1.0));
