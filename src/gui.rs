@@ -2535,6 +2535,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let pause_b = pause_btn.clone();
         let pause_icon = pause_icon.clone();
         let mut last_pause_state = (false, false);
+        let mut hidden = false;
+        let mut notified = false;
         let win = window.clone();
         let keep_on_screen = keep_island_on_screen.clone();
         let app_n = app.clone();
@@ -2572,6 +2574,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let elapsed = g.recording_elapsed_sec();
             let countdown = g.countdown_left();
             let user_paused = g.is_paused_by_user();
+            let hide_setting = g.settings.hide_while_recording;
 
             // Check if user is in "Record Combo…" self-registration mode and performed a global gesture/button/key
             let mut learned_label: Option<String> = None;
@@ -2681,6 +2684,40 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             }
 
             let can_pause = is_rec && capture_live && paused.is_none() && countdown.is_none();
+            // Out of the video: hidden while really recording, back for the
+            // countdown, pauses (which are cut), and saving.
+            let hide = hide_setting && can_pause && !user_paused;
+            // The way back to a hidden bar: a quiet notification with Stop and
+            // Pause, posted when the capture goes live so a banner shows
+            // during the countdown, which is cut.
+            let notify = hide_setting && is_rec && capture_live;
+            if notify != notified {
+                notified = notify;
+                if notify {
+                    let note = gio::Notification::new("Recording");
+                    note.set_body(Some(&format!(
+                        "{} stops, {} pauses.",
+                        crate::shortcuts::DEFAULT_LABEL,
+                        crate::shortcuts::PAUSE_LABEL
+                    )));
+                    note.set_priority(gio::NotificationPriority::Low);
+                    note.add_button("Stop", "app.toggle-record");
+                    note.add_button("Pause", "app.pause-record");
+                    app_n.send_notification(Some("recording-hidden"), &note);
+                } else {
+                    app_n.withdraw_notification("recording-hidden");
+                }
+            }
+            if hide != hidden {
+                hidden = hide;
+                if hide {
+                    win.set_visible(false);
+                } else {
+                    win.set_visible(true);
+                    let keep_on_screen = keep_on_screen.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(80), move || keep_on_screen());
+                }
+            }
             if (can_pause, user_paused) != last_pause_state {
                 pause_b.set_visible(can_pause);
                 sync_pause_button(&pause_b, &pause_icon, user_paused);
