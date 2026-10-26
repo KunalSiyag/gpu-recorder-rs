@@ -423,6 +423,12 @@ impl StudioState {
         (x, y, Default::default())
     }
 
+    /// Whether the saved settings record the webcam (read before the state
+    /// exists, to probe the camera early).
+    pub fn webcam_wanted() -> bool {
+        RecorderSettings::load().webcam != crate::settings::Webcam::Off
+    }
+
     /// How the next capture records, from the current settings.
     fn capture_options(&self) -> CaptureOptions {
         let settings = &self.settings;
@@ -612,6 +618,7 @@ impl StudioState {
         if !self.is_recording() {
             return None;
         }
+        let before_start = self.countdown_left().is_some();
         let live_cuts = self.take_part_cuts();
         self.countdown_pending = 0;
         let session = self.encoder_session.take();
@@ -641,6 +648,7 @@ impl StudioState {
             session,
             webcam: self.webcam.take(),
             live_cuts,
+            before_start,
             capture,
             auto_zoom: self.auto_apply_zoom_on_stop && settings.auto_zoom,
             settings,
@@ -708,6 +716,8 @@ pub struct StopJob {
     session: Option<ActiveEncoderSession>,
     /// Cuts of the running part.
     live_cuts: Vec<(f64, f64)>,
+    /// Stopped during the countdown: nothing was recorded yet.
+    before_start: bool,
     webcam: Option<crate::webcam::WebcamRecorder>,
     /// Where the whole recording's capture goes.
     capture: PathBuf,
@@ -720,6 +730,10 @@ impl StopJob {
     /// MP4 to show the user. A failed render falls back to the plain capture,
     /// so a recording is never lost to a post-processing error.
     pub fn complete(self, progress: &AtomicU32) -> Result<PathBuf> {
+        if self.before_start {
+            self.discard();
+            anyhow::bail!("the recording stopped before the countdown ended");
+        }
         let mut parts = self.parts;
         if let Some(session) = self.session {
             let mut live = session.finish_capture();
@@ -788,9 +802,31 @@ impl StopJob {
             format: Default::default(),
             webcam,
         };
+        // What the cuts (countdown, pauses) leave of the capture.
+        let kept = (!job.cuts.is_empty())
+            .then(|| crate::ffmpeg::probe_video(&capture).ok())
+            .flatten()
+            .map(|info| {
+                let video_sec = (info.duration_sec - info.video_start_sec).max(0.0);
+                (studio_render::kept_ranges(&job.cuts, video_sec), info.video_start_sec)
+            });
+        if kept.as_ref().is_some_and(|(k, _)| k.iter().map(|(a, b)| b - a).sum::<f64>() < 0.1) {
+            // Stopped during the countdown: there is nothing to keep.
+            let _ = std::fs::remove_file(&capture);
+            if let Some(cam) = &job.webcam {
+                let _ = std::fs::remove_file(&cam.path);
+            }
+            anyhow::bail!("the recording stopped before the countdown ended");
+        }
         let result = studio_render::render(&job, progress).or_else(|err| {
             eprintln!("[HyperGSR] {err:#}; saving the recording without effects");
-            crate::ffmpeg::remux_to_mp4(&capture, &output).map(|_| output.clone())
+            match &kept {
+                // Paused or counted-down footage must not reach the video.
+                Some((kept, video_start)) => crate::ffmpeg::cut_to_mp4(&capture, &output, kept, *video_start),
+                None if job.cuts.is_empty() => crate::ffmpeg::remux_to_mp4(&capture, &output),
+                None => Err(anyhow::anyhow!("cannot read the capture to cut it")),
+            }
+            .map(|_| output.clone())
         });
         match result {
             Ok(path) => {
@@ -798,14 +834,23 @@ impl StopJob {
                 crate::project::keep(&job, zoomable);
                 Ok(path)
             }
-            // The fragmented capture plays as is; hand it over under the final name.
             Err(err) => {
-                eprintln!("[HyperGSR] {err:#}; keeping the raw capture");
                 if let Some(cam) = &job.webcam {
                     let _ = std::fs::remove_file(&cam.path);
                 }
                 let _ = std::fs::remove_file(&output);
-                Ok(std::fs::rename(&capture, &output).map_or(capture, |_| output))
+                if job.cuts.is_empty() {
+                    // The fragmented capture plays as is; hand it over under the final name.
+                    eprintln!("[HyperGSR] {err:#}; keeping the raw capture");
+                    return Ok(std::fs::rename(&capture, &output).map_or(capture, |_| output));
+                }
+                // Not under the final name: it still holds the cut parts.
+                let uncut = output.with_extension("uncut.mp4");
+                let kept_at = if std::fs::rename(&capture, &uncut).is_ok() { uncut } else { capture };
+                anyhow::bail!(
+                    "{err:#}; the full capture, including the countdown and pauses, is in {}",
+                    kept_at.display()
+                )
             }
         }
     }

@@ -228,7 +228,8 @@ fn main() -> anyhow::Result<()> {
         }
         let clip = state.lock().replay_clip()?;
         let saved = clip.save();
-        if let Some(replay) = state.lock().take_replay() {
+        let replay = state.lock().take_replay();
+        if let Some(replay) = replay {
             replay.stop();
         }
         println!("✔ Saved replay clip -> {}", saved?.display());
