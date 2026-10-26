@@ -108,9 +108,52 @@ impl WebcamClip {
     }
 }
 
+/// Whether `device` offers 640x480 MJPEG. Asked once per device, with a
+/// timeout, since a wedged camera can block opening forever.
+fn offers_small_mjpeg(device: &Path) -> bool {
+    static KNOWN: std::sync::Mutex<Vec<(PathBuf, bool)>> = std::sync::Mutex::new(Vec::new());
+    if let Some(&(_, mjpeg)) = KNOWN.lock().ok().and_then(|k| k.iter().find(|(d, _)| d == device).cloned()).as_ref() {
+        return mjpeg;
+    }
+    let probe = Command::new("ffmpeg")
+        .args(["-hide_banner", "-f", "v4l2", "-list_formats", "compressed", "-i"])
+        .arg(device)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+    let Ok(mut probe) = probe else { return false };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while probe.try_wait().ok().flatten().is_none() {
+        if Instant::now() > deadline {
+            let _ = probe.kill();
+            let _ = probe.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut text = String::new();
+    if let Some(mut err) = probe.stderr.take() {
+        let _ = err.read_to_string(&mut text);
+    }
+    let mjpeg = text.lines().any(|l| l.contains("mjpeg") && l.contains("640x480"));
+    if let Ok(mut known) = KNOWN.lock() {
+        known.push((device.to_path_buf(), mjpeg));
+    }
+    mjpeg
+}
+
+/// Learns the default camera's formats ahead of the first recording.
+pub fn warm_up() {
+    if let Some(device) = default_device() {
+        offers_small_mjpeg(&device.path);
+    }
+}
+
 /// Records a camera to a file while the screen is recorded.
 pub struct WebcamRecorder {
-    child: Child,
+    /// Taken when stopped; a recorder dropped while running kills it.
+    child: Option<Child>,
     path: PathBuf,
     /// CLOCK_MONOTONIC when FFmpeg was started, to sanity-check its stamps.
     spawned: f64,
@@ -120,16 +163,7 @@ impl WebcamRecorder {
     pub fn start(device: &Path, output: &Path) -> Result<Self> {
         // A small MJPEG stream keeps USB bandwidth and decoding cheap; other
         // cameras record in their default mode.
-        let mjpeg = Command::new("ffmpeg")
-            .args(["-hide_banner", "-f", "v4l2", "-list_formats", "compressed", "-i"])
-            .arg(device)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .output()
-            .is_ok_and(|o| {
-                let text = String::from_utf8_lossy(&o.stderr);
-                text.lines().any(|l| l.contains("mjpeg") && l.contains("640x480"))
-            });
+        let mjpeg = offers_small_mjpeg(device);
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "v4l2"]);
         if mjpeg {
@@ -145,35 +179,59 @@ impl WebcamRecorder {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // The camera must never outlive the recorder, even if it is killed.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
         let spawned = monotonic_now();
         let child = cmd.spawn().context("cannot start FFmpeg for the webcam")?;
-        Ok(Self { child, path: output.to_path_buf(), spawned })
+        Ok(Self { child: Some(child), path: output.to_path_buf(), spawned })
     }
 
     /// Stops recording; returns the file and when its first frame was taken.
     pub fn finish(mut self) -> Option<(PathBuf, f64)> {
-        if let Some(mut stdin) = self.child.stdin.take() {
-            let _ = stdin.write_all(b"q");
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.child.try_wait().ok().flatten().is_none() {
-            if Instant::now() > deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                break;
+        if let Some(mut child) = self.child.take() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(b"q");
             }
-            std::thread::sleep(Duration::from_millis(20));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while child.try_wait().ok().flatten().is_none() {
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
-        let start = first_stamp(&self.path)?;
+        // A camera that sent no frames leaves nothing worth keeping.
+        let Some(start) = first_stamp(&self.path) else {
+            let _ = std::fs::remove_file(&self.path);
+            return None;
+        };
         // A camera stamping another clock is placed by when it started.
         let start = if (start - self.spawned).abs() < 15.0 { start } else { self.spawned + 0.5 };
-        Some((self.path, start))
+        Some((std::mem::take(&mut self.path), start))
     }
 
     /// Stops recording and deletes the file.
     pub fn discard(self) {
         if let Some((path, _)) = self.finish() {
             let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for WebcamRecorder {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }
@@ -367,6 +425,19 @@ mod tests {
         assert_eq!(late.frame_at(0.5), None);
         assert_eq!(late.frame_at(1.5), Some(15));
         assert_eq!(late.frame_at(6.0), None);
+    }
+
+    #[test]
+    fn a_camera_that_records_nothing_leaves_no_file() {
+        let out = std::env::temp_dir().join(format!("hypergsr-cam-{}.webcam.mkv", std::process::id()));
+        let missing = Path::new("/dev/hypergsr-no-such-camera");
+        let cam = WebcamRecorder::start(missing, &out).expect("FFmpeg starts");
+        assert!(cam.finish().is_none());
+        assert!(!out.exists());
+        // Dropped while running: stopped, and its file removed.
+        let cam = WebcamRecorder::start(missing, &out).expect("FFmpeg starts");
+        drop(cam);
+        assert!(!out.exists());
     }
 
     #[test]

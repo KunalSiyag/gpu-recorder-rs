@@ -57,6 +57,9 @@ pub fn warm_up() {
         capabilities();
         crate::encoder::ActiveEncoderSession::warm_up();
         crate::encoder::portal_cursor_metadata();
+        if crate::state::StudioState::webcam_wanted() {
+            crate::webcam::warm_up();
+        }
     });
 }
 
@@ -419,6 +422,35 @@ pub fn concat_segments(segments: &[Segment], output: &Path) -> Result<()> {
 }
 
 /// Copies the streams into a web-friendly MP4 without re-encoding.
+/// Re-encodes `input` in software keeping only the video-time ranges
+/// `kept` (the first video frame sits at `video_start` in the file): the
+/// fallback when the studio render fails on a recording with cuts, so
+/// paused or counted-down footage never ends up in the video.
+pub fn cut_to_mp4(input: &Path, output: &Path, kept: &[(f64, f64)], video_start: f64) -> Result<()> {
+    let select = kept
+        .iter()
+        .map(|(a, b)| format!("between(t,{:.4},{:.4})", a + video_start, b + video_start))
+        .collect::<Vec<_>>()
+        .join("+");
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(input)
+        .args(["-map", "0:v:0", "-map", "0:a?"])
+        .args(["-vf", &format!("select='{select}',setpts=N/FRAME_RATE/TB")])
+        .args(["-af", &format!("aselect='{select}',asetpts=N/SR/TB")])
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"])
+        .args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4"])
+        .arg(output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .context("cannot run ffmpeg")?;
+    if !status.success() {
+        bail!("ffmpeg could not cut {}", input.display());
+    }
+    Ok(())
+}
+
 pub fn remux_to_mp4(input: &Path, output: &Path) -> Result<()> {
     let status = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])

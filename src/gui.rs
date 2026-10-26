@@ -2342,10 +2342,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let busy_flag = bg_zoom_busy.clone();
         let show_recording = show_recording.clone();
         let stop_and_save = stop_and_save.clone();
+        // Set while a cancelled recording lets go of the screen and camera.
+        let discarding = Arc::new(AtomicBool::new(false));
 
         rec_btn.connect_clicked(move |_| {
             if busy_flag.load(Ordering::Relaxed) {
                 footer.set_text("Still saving the last recording…");
+                return;
+            }
+            if discarding.load(Ordering::Relaxed) {
+                footer.set_text("Still closing the cancelled recording…");
                 return;
             }
             if st.lock().countdown_left().is_some() {
@@ -2355,7 +2361,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 s_lbl.remove_css_class("island-countdown");
                 s_lbl.set_text("HyperGSR");
                 footer.set_text("Recording cancelled");
-                std::thread::spawn(move || job.discard());
+                discarding.store(true, Ordering::Relaxed);
+                let discarding = discarding.clone();
+                std::thread::spawn(move || {
+                    job.discard();
+                    discarding.store(false, Ordering::Relaxed);
+                });
                 return;
             }
             if st.lock().is_recording() {
@@ -2417,6 +2428,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
     // Instant replay. The buffer's look reuses the recording one.
     let clip_slot: Arc<parking_lot::Mutex<Option<Result<PathBuf, String>>>> = Arc::default();
+    // Set while a clip is being written, so quitting waits for it.
+    let clip_busy = Arc::new(AtomicBool::new(false));
     let show_replay: Rc<dyn Fn(bool)> = {
         let show_recording = show_recording.clone();
         let (rec, replay, clip, stop, edit) =
@@ -2459,6 +2472,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let footer = footer_lbl.clone();
         let s_lbl = status_lbl.clone();
         let slot = clip_slot.clone();
+        let clip_busy = clip_busy.clone();
         clip_btn.connect_clicked(move |btn| {
             let clip = st.lock().replay_clip();
             match clip {
@@ -2466,7 +2480,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     btn.set_sensitive(false);
                     s_lbl.set_text("Saving clip…");
                     let slot = slot.clone();
-                    std::thread::spawn(move || *slot.lock() = Some(clip.save().map_err(|e| format!("{e:#}"))));
+                    clip_busy.store(true, Ordering::Relaxed);
+                    let clip_busy = clip_busy.clone();
+                    std::thread::spawn(move || {
+                        *slot.lock() = Some(clip.save().map_err(|e| format!("{e:#}")));
+                        clip_busy.store(false, Ordering::Relaxed);
+                    });
                 }
                 Err(err) => footer.set_text(&format!("{err:#}")),
             }
@@ -2477,7 +2496,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let show_replay = show_replay.clone();
         let edit = edit_btn.clone();
         replay_stop_btn.connect_clicked(move |_| {
-            if let Some(replay) = st.lock().take_replay() {
+            let replay = st.lock().take_replay();
+            if let Some(replay) = replay {
                 std::thread::spawn(move || replay.stop());
             }
             show_replay(false);
@@ -2561,39 +2581,41 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let st = state.clone();
         let win = window.clone();
         let busy_flag = bg_zoom_busy.clone();
+        let clip_busy = clip_busy.clone();
         close_btn.connect_clicked(move |_| {
-            // Save a running recording, and let a render in progress finish,
-            // before quitting; the island hides at once. Instant replay just
-            // stops.
-            if let Some(replay) = st.lock().take_replay() {
-                replay.stop();
-            }
+            // Save a running recording, and let a render or a clip in
+            // progress finish, before quitting; the island hides at once.
+            // Instant replay just stops.
+            let replay = st.lock().take_replay();
             let job = st.lock().take_recording();
-            if job.is_none() && !busy_flag.load(Ordering::Relaxed) {
+            let busy = || busy_flag.load(Ordering::Relaxed) || clip_busy.load(Ordering::Relaxed);
+            if job.is_none() && replay.is_none() && !busy() {
                 win.close();
                 return;
             }
             win.set_visible(false);
             let (tx, rx) = std::sync::mpsc::channel::<()>();
-            if let Some(job) = job {
-                std::thread::spawn(move || {
+            std::thread::spawn(move || {
+                if let Some(replay) = replay {
+                    replay.stop();
+                }
+                if let Some(job) = job {
                     let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         job.complete(&AtomicU32::new(0))
                     }));
                     if !matches!(saved, Ok(Ok(_))) {
                         eprintln!("[HyperGSR] Could not save the recording");
                     }
-                    let _ = tx.send(());
-                });
-            } else {
-                drop(tx);
-            }
+                }
+                let _ = tx.send(());
+            });
             let win = win.clone();
             let busy_flag = busy_flag.clone();
+            let clip_busy = clip_busy.clone();
             let mut saved = false;
             glib::timeout_add_local(Duration::from_millis(100), move || {
                 saved = saved || !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
-                if !saved || busy_flag.load(Ordering::Relaxed) {
+                if !saved || busy_flag.load(Ordering::Relaxed) || clip_busy.load(Ordering::Relaxed) {
                     return ControlFlow::Continue;
                 }
                 win.close();
@@ -2607,11 +2629,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let st = state.clone();
         let busy_flag = bg_zoom_busy.clone();
         let close_btn = close_btn.clone();
+        let clip_busy = clip_busy.clone();
         window.connect_close_request(move |_| {
             let pending = {
                 let g = st.lock();
                 g.is_recording() || g.replay_active()
-            } || busy_flag.load(Ordering::Relaxed);
+            } || busy_flag.load(Ordering::Relaxed)
+                || clip_busy.load(Ordering::Relaxed);
             if pending {
                 close_btn.emit_clicked();
                 return glib::Propagation::Stop;

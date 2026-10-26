@@ -314,7 +314,13 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
         // capture's header overstates its length by up to a keyframe interval).
         // Otherwise anything short means the decoder stopped early.
         Ok((n, decoder_ok)) if n > 0 && (decoder_ok || n + slack >= window.frames) => {
-            std::fs::rename(&tmp, &job.output)?;
+            if job.format == ExportFormat::Gif {
+                let made = gif_from(&tmp, &job.output);
+                let _ = std::fs::remove_file(&tmp);
+                made?;
+            } else {
+                std::fs::rename(&tmp, &job.output)?;
+            }
             progress.store(1000, Ordering::Relaxed);
             Ok(job.output.clone())
         }
@@ -327,6 +333,37 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
             bail!("studio render failed: {reason}")
         }
     }
+}
+
+/// Turns the GIF intermediate into a GIF: one palette for the whole clip,
+/// weighted to what changes, then applied with ordered dithering.
+fn gif_from(intermediate: &Path, output: &Path) -> Result<()> {
+    let palette = output.with_extension("palette.png");
+    let run = |args: &[&str]| -> Result<()> {
+        let status = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(args)
+            .stdin(Stdio::null())
+            .status()
+            .context("cannot run ffmpeg")?;
+        if !status.success() {
+            bail!("ffmpeg could not make the GIF ({status})");
+        }
+        Ok(())
+    };
+    let (src, pal, out) = (
+        intermediate.display().to_string(),
+        palette.display().to_string(),
+        output.display().to_string(),
+    );
+    let made = run(&["-i", &src, "-vf", "palettegen=stats_mode=diff", &pal]).and_then(|_| {
+        run(&[
+            "-i", &src, "-i", &pal, "-lavfi", "paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle",
+            "-loop", "0", "-f", "gif", &out,
+        ])
+    });
+    let _ = std::fs::remove_file(&palette);
+    made
 }
 
 /// Which input frames the render reads and which it keeps.
@@ -380,13 +417,13 @@ fn export_args(format: ExportFormat, encoder: &VideoEncoder, quality: Quality, a
             push(&mut args, &["-f", "webm"]);
         }
         ExportFormat::Gif => {
+            // Frames at GIF size and rate in a near-lossless intermediate;
+            // `gif_from` then makes one palette and applies it. A one-pass
+            // palette would hold every frame in memory until the end.
             push(&mut args, &["-map", "0:v:0", "-an"]);
-            push(&mut args, &[
-                "-vf",
-                "fps=15,scale='min(960,iw)':-2:flags=lanczos,split[a][b];\
-                 [a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4",
-            ]);
-            push(&mut args, &["-loop", "0", "-f", "gif"]);
+            push(&mut args, &["-vf", "fps=15,scale='min(960,iw)':-2:flags=lanczos"]);
+            push(&mut args, &["-c:v", "libx264", "-preset", "veryfast", "-crf", "10", "-pix_fmt", "yuv444p"]);
+            push(&mut args, &["-f", "matroska"]);
         }
     }
     args
