@@ -443,6 +443,7 @@ impl StudioState {
             studio_cursor: crate::encoder::portal_cursor_metadata()
                 && std::env::var_os("HYPERGSR_NATIVE_CURSOR").is_none(),
             repick: self.repick_source,
+            clean_mic: settings.clean_mic,
         };
         let session = match ActiveEncoderSession::start_capture(&capture_path, &options) {
             Ok(session) => session,

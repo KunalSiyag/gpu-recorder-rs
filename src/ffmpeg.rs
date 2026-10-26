@@ -210,11 +210,16 @@ pub fn video_encoder_args(encoder: &VideoEncoder, quality: Quality, filters: &[S
 /// Output arguments for the capture helper: audio inputs, encoder, and a
 /// fragmented MP4 that stays playable up to the last keyframe if the recorder
 /// is killed. The helper supplies the video input itself.
+/// Cleans up a microphone: drops rumble below 80 Hz and removes steady
+/// background noise (fans, hum, hiss), tracking it as it changes.
+pub const MIC_CLEANUP: &str = "highpass=f=80,afftdn=nr=12:nf=-50:tn=1";
+
 pub fn capture_output_args(
     encoder: &VideoEncoder,
     quality: Quality,
     fps: u32,
     audio: AudioMode,
+    clean_mic: bool,
     region: Option<Region>,
     output: &Path,
 ) -> Vec<String> {
@@ -230,18 +235,15 @@ pub fn capture_output_args(
     }
 
     push(&mut args, &["-map", "0:v:0"]);
-    match audio_inputs {
-        0 => {}
-        1 => push(&mut args, &["-map", "1:a:0"]),
-        _ => push(
-            &mut args,
-            &[
-                "-filter_complex",
-                "[1:a][2:a]amix=inputs=2:duration=longest:normalize=0[mix]",
-                "-map",
-                "[mix]",
-            ],
-        ),
+    let mic_filter = if clean_mic { MIC_CLEANUP } else { "anull" };
+    match (audio_inputs, audio.records_microphone()) {
+        (0, _) => {}
+        (1, false) => push(&mut args, &["-map", "1:a:0"]),
+        (1, true) => push(&mut args, &["-map", "1:a:0", "-af", mic_filter]),
+        _ => {
+            let graph = format!("[2:a]{mic_filter}[mic];[1:a][mic]amix=inputs=2:duration=longest:normalize=0[mix]");
+            push(&mut args, &["-filter_complex", &graph, "-map", "[mix]"]);
+        }
     }
 
     // 4:2:0 encoders need even sizes; a window can be any size. The fps
@@ -445,16 +447,20 @@ mod tests {
             Quality::High,
             60,
             AudioMode::Both,
+            true,
             Some(region),
             Path::new("/tmp/out.capture.mp4"),
         );
         let joined = args.join(" ");
         assert!(joined.contains("@DEFAULT_MONITOR@"));
         assert!(joined.contains("@DEFAULT_SOURCE@"));
+        assert!(joined.contains("[2:a]highpass=f=80,afftdn"));
         assert!(joined.contains("amix=inputs=2"));
         assert!(joined.contains("-shortest"));
         assert!(joined.contains("crop=w=trunc(iw*0.50000/2)*2"));
-        let plain = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Off, None, Path::new("o.mp4"));
+        let mic = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Microphone, false, None, Path::new("o.mp4"));
+        assert!(mic.join(" ").contains("-map 1:a:0 -af anull"));
+        let plain = capture_output_args(&VideoEncoder::X264, Quality::High, 30, AudioMode::Off, true, None, Path::new("o.mp4"));
         assert!(plain.join(" ").contains("crop=trunc(iw/2)*2:trunc(ih/2)*2"));
         assert!(!plain.join(" ").contains("-shortest"));
         assert_eq!(args.last().unwrap(), "/tmp/out.capture.mp4");

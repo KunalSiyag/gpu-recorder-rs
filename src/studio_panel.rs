@@ -308,6 +308,29 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     };
     audio_track.set_hexpand(true);
     audio_row.append(&audio_track);
+    let clean_label = |on: bool| if on { "● Clean" } else { "○ Clean" };
+    let clean_btn = Button::with_label(clean_label(settings.clean_mic));
+    clean_btn.add_css_class(if settings.clean_mic { "toggle-chip-on" } else { "toggle-chip" });
+    clean_btn.set_tooltip_text(Some(
+        "Noise reduction for the microphone: removes fan noise, hum, and hiss, and low rumble",
+    ));
+    {
+        let st = state.clone();
+        let footer = footer.clone();
+        clean_btn.connect_clicked(move |btn| {
+            update(&st, |s| s.clean_mic = !s.clean_mic);
+            let on = st.lock().settings.clean_mic;
+            set_btn_text(btn, clean_label(on));
+            btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
+            btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
+            footer.set_text(if on {
+                "✓ Microphone noise reduction on"
+            } else {
+                "○ The microphone is recorded as is"
+            });
+        });
+    }
+    audio_row.append(&clean_btn);
     rec_card.append(&audio_row);
 
     let quality_row = GtkBox::new(Orientation::Horizontal, 6);
