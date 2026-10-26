@@ -7,8 +7,10 @@ pub mod cursor_track;
 pub mod decompiled_gsr;
 pub mod encoder;
 pub mod ffmpeg;
+pub mod editor;
 pub mod gui;
 pub mod island_position;
+pub mod project;
 pub mod region_select;
 pub mod settings;
 pub mod shaders;
@@ -21,6 +23,7 @@ pub mod x11_above;
 pub mod zoom_engine;
 
 use crate::state::{SharedStudioState, StudioState};
+use anyhow::Context;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -79,6 +82,19 @@ fn main() -> anyhow::Result<()> {
     // Bound to a desktop shortcut: start or stop the running recorder.
     if let Some(flag) = args.iter().find(|a| *a == "--toggle-recording" || *a == "--pause-recording") {
         return shortcuts::activate_running_recorder(flag);
+    }
+
+    // --edit <video>: open the editor in the running island, or start one
+    // that opens it.
+    if let Some(idx) = args.iter().position(|a| a == "--edit") {
+        let file = args.get(idx + 1).context("usage: --edit <video>")?;
+        let file = std::fs::canonicalize(file).with_context(|| format!("cannot open {file}"))?;
+        if std::env::var("HYPERGSR_LAYER_SHELL").as_deref() != Ok("1")
+            && shortcuts::activate_in_running("edit", Some(glib::Variant::from(file.display().to_string())))?
+        {
+            return Ok(());
+        }
+        std::env::set_var("HYPERGSR_EDIT", &file);
     }
 
     // Ensure GTK4 initializes on native Wayland with libgtk4-layer-shell preloaded

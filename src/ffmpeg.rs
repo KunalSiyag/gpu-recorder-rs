@@ -283,6 +283,8 @@ pub struct VideoInfo {
     pub has_audio: bool,
     /// Time of the first video frame; audio may start before it.
     pub video_start_sec: f64,
+    /// Frame rate of the video stream, when stated.
+    pub fps: Option<f64>,
 }
 
 /// Reads size and duration from `ffmpeg -i`, which is always installed,
@@ -321,6 +323,7 @@ fn parse_probe(text: &str) -> Result<VideoInfo> {
     let mut duration_sec = 0.0;
     let mut size = None;
     let mut has_audio = false;
+    let mut fps = None;
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Duration: ") {
@@ -337,6 +340,10 @@ fn parse_probe(text: &str) -> Result<VideoInfo> {
                     Some((w.parse::<usize>().ok()?, h.parse::<usize>().ok()?))
                 })
                 .find(|&(w, h)| w > 0 && h > 0);
+            fps = line
+                .split(',')
+                .find_map(|tok| tok.trim().strip_suffix(" fps")?.parse::<f64>().ok())
+                .filter(|f| f.is_finite() && *f > 0.0);
         } else if line.starts_with("Stream #") && line.contains(": Audio: ") {
             has_audio = true;
         }
@@ -350,6 +357,7 @@ fn parse_probe(text: &str) -> Result<VideoInfo> {
         duration_sec,
         has_audio,
         video_start_sec: 0.0,
+        fps,
     })
 }
 
@@ -420,6 +428,7 @@ mod tests {
         assert_eq!((info.width, info.height), (2560, 1600));
         assert!((info.duration_sec - 65.85).abs() < 1e-6);
         assert!(info.has_audio);
+        assert_eq!(info.fps, Some(60.0));
     }
 
     #[test]

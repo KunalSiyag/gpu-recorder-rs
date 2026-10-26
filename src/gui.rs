@@ -12,7 +12,7 @@ use gtk4::{
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -918,6 +918,36 @@ pub(crate) fn set_btn_text(button: &Button, text: &str) {
     }
 }
 
+/// The newest saved recording in `dir`.
+fn latest_recording(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            name.starts_with("HyperGSR_") && name.ends_with(".mp4") && !name.ends_with(".capture.mp4")
+        })
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+}
+
+/// Renders `widget` (inside `window`) to a PNG, for screenshots in tests
+/// and documentation.
+pub(crate) fn save_widget_png(widget: &impl IsA<gtk4::Widget>, window: &impl IsA<gtk4::Native>, path: &str) {
+    let paintable = gtk4::WidgetPaintable::new(Some(widget));
+    let w = widget.width().max(1);
+    let h = widget.height().max(1);
+    let snap = gtk4::Snapshot::new();
+    gdk4::prelude::PaintableExt::snapshot(&paintable, &snap, w as f64, h as f64);
+    if let Some(node) = snap.to_node() {
+        if let Some(renderer) = gtk4::prelude::NativeExt::renderer(window) {
+            let rect = gtk4::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+            let tex = gtk4::prelude::GskRendererExt::render_texture(&renderer, &node, Some(&rect));
+            let _ = gdk4::prelude::TextureExt::save_to_png(&tex, path);
+        }
+    }
+}
+
 /// Shows Pause, or Continue while paused.
 fn sync_pause_button(button: &Button, image: &Image, paused: bool) {
     let shortcut = crate::shortcuts::PAUSE_LABEL;
@@ -1098,6 +1128,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     pause_btn.set_tooltip_text(Some(&format!("Pause ({})", crate::shortcuts::PAUSE_LABEL)));
     pause_btn.set_visible(false);
 
+    // Opens the editor on the latest recording.
+    let edit_btn = icon_button("trim", "Edit");
+    edit_btn.add_css_class("studio-pill");
+    edit_btn.set_tooltip_text(Some("Trim the latest recording, or export it vertical, square, WebM, or GIF"));
+    edit_btn.set_visible(latest_recording(&state.lock().videos_dir).is_some());
+
     // 4. Quick Dark / Light Theme Pill
     let theme_btn = Button::new();
     theme_btn.add_css_class("theme-pill");
@@ -1133,6 +1169,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     top_row.append(&resume_btn);
     top_row.append(&pause_btn);
     top_row.append(&rec_btn);
+    top_row.append(&edit_btn);
     top_row.append(&theme_btn);
     top_row.append(&expand_btn);
     top_row.append(&close_btn);
@@ -2195,13 +2232,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let r_btn = rec_btn.clone();
         let shell = shell_box.clone();
         let s_lbl = status_lbl.clone();
-        let extras = [theme_btn.clone(), expand_btn.clone(), close_btn.clone()];
+        let extras = [theme_btn.clone(), expand_btn.clone(), close_btn.clone(), edit_btn.clone()];
         let drw = drawer_box.clone();
         let win = window.clone();
         let keep_on_screen = keep_island_on_screen.clone();
         Rc::new(move |recording: bool| {
-            for b in &extras {
+            for b in &extras[..3] {
                 b.set_visible(!recording);
+            }
+            if recording {
+                extras[3].set_visible(false);
             }
             if recording && drw.is_visible() {
                 drw.set_visible(false);
@@ -2343,6 +2383,35 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         });
     }
 
+    {
+        let st = state.clone();
+        let app = app.clone();
+        edit_btn.connect_clicked(move |_| {
+            let file = {
+                let g = st.lock();
+                g.last_saved_file.as_ref().map(PathBuf::from).filter(|p| p.is_file()).or_else(|| latest_recording(&g.videos_dir))
+            };
+            if let Some(file) = file {
+                crate::editor::open(&app, &file);
+            }
+        });
+    }
+    // `hypergsr --edit <video>` with an island already running.
+    {
+        let action = gio::SimpleAction::new("edit", Some(glib::VariantTy::STRING));
+        let app2 = app.clone();
+        action.connect_activate(move |_, param| {
+            if let Some(path) = param.and_then(|p| p.get::<String>()) {
+                crate::editor::open(&app2, Path::new(&path));
+            }
+        });
+        app.add_action(&action);
+    }
+    if let Some(path) = std::env::var_os("HYPERGSR_EDIT") {
+        let app = app.clone();
+        glib::idle_add_local_once(move || crate::editor::open(&app, Path::new(&path)));
+    }
+
     // `hypergsr --toggle-recording` and `--pause-recording` (the desktop
     // shortcuts) land here.
     {
@@ -2462,6 +2531,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let rec_combo_b = record_combo_btn.clone();
         let preset_btns = combo_preset_btns.clone();
         let resume_b = resume_btn.clone();
+        let edit_b = edit_btn.clone();
         let pause_b = pause_btn.clone();
         let pause_icon = pause_icon.clone();
         let mut last_pause_state = (false, false);
@@ -2659,6 +2729,8 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
                         st.lock().last_saved_file = Some(path.display().to_string());
+                        edit_b.set_visible(true);
+                        win.set_default_size(1, 1);
                         s_lbl.set_text("Saved ✓");
                         f_lbl.set_text(&format!("Saved {name}"));
                     }
@@ -2775,18 +2847,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             .and_then(|v| v.parse().ok())
             .unwrap_or(650);
         glib::timeout_add_local_once(Duration::from_millis(delay), move || {
-            let paintable = gtk4::WidgetPaintable::new(Some(&shell_shot));
-            let w = shell_shot.width().max(1);
-            let h = shell_shot.height().max(1);
-            let snap = gtk4::Snapshot::new();
-            gdk4::prelude::PaintableExt::snapshot(&paintable, &snap, w as f64, h as f64);
-            if let Some(node) = snap.to_node() {
-                if let Some(renderer) = gtk4::prelude::NativeExt::renderer(&win_shot) {
-                    let rect = gtk4::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
-                    let tex = gtk4::prelude::GskRendererExt::render_texture(&renderer, &node, Some(&rect));
-                    let _ = gdk4::prelude::TextureExt::save_to_png(&tex, &shot_path);
-                }
-            }
+            save_widget_png(&shell_shot, &win_shot, &shot_path);
             win_shot.close();
         });
     }

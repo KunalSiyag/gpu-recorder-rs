@@ -3,10 +3,11 @@
 //! it back on a smoothed path, at the chosen size, over the zoomed frame.
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// One cursor image in straight-alpha RGBA.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Shape {
     pub w: usize,
     pub h: usize,
@@ -15,7 +16,7 @@ pub struct Shape {
     pub rgba: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     /// Video time in seconds.
     pub t: f64,
@@ -26,7 +27,7 @@ pub struct Sample {
     pub shape: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CursorTrack {
     /// Size of the stream the positions are in, when known.
     pub stream_size: Option<(u32, u32)>,
