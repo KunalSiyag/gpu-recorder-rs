@@ -650,6 +650,7 @@ pub fn open(app: &Application, file: &Path) {
         let model = model.clone();
         let area = timeline.clone();
         let video = video.clone();
+        let shown_first = Cell::new(false);
         glib::timeout_add_local(Duration::from_millis(40), move || {
             let Some(_win) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
@@ -667,6 +668,11 @@ pub fn open(app: &Application, file: &Path) {
                 area.queue_draw();
             }
             if let Some(stream) = video.media_stream() {
+                // Show the first frame instead of a black box before playing.
+                if !shown_first.get() && stream.is_prepared() {
+                    shown_first.set(true);
+                    stream.seek(0);
+                }
                 let t = stream.timestamp() as f64 / 1e6;
                 let (end, playing) = (model.borrow().trim.1, stream.is_playing());
                 // Playback stops at the end of the trim.
@@ -713,7 +719,8 @@ pub fn open(app: &Application, file: &Path) {
     if let Ok(path) = std::env::var("HYPERGSR_EDITOR_SHOT") {
         let win = window.clone();
         let root = root.clone();
-        glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+        let delay = std::env::var("HYPERGSR_SCREENSHOT_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2500);
+        glib::timeout_add_local_once(Duration::from_millis(delay), move || {
             crate::gui::save_widget_png(&root, &win, &path);
             if let Some(app) = win.application() {
                 app.quit();
