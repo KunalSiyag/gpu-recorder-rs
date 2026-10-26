@@ -186,6 +186,8 @@ pub struct FinishedCapture {
     pub keep_sec: Option<f64>,
     /// The cursor, when it was recorded beside the video.
     pub cursor: Option<crate::cursor_track::CursorTrack>,
+    /// Video-time ranges to leave out: the countdown and pauses.
+    pub cuts: Vec<(f64, f64)>,
 }
 
 const HELPER_PROTOCOL: &str = "5";
@@ -702,6 +704,7 @@ impl ActiveEncoderSession {
             error,
             keep_sec,
             cursor,
+            cuts: Vec::new(),
         }
     }
 
