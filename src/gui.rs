@@ -12,7 +12,7 @@ use gtk4::{
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -183,6 +183,8 @@ pub(crate) fn layer_api() -> Option<&'static LayerApi> {
         if is_supported() == 0 {
             return None;
         }
+        // Each symbol is cast to the field's function type, as declared above.
+        #[allow(clippy::missing_transmute_annotations)]
         Some(LayerApi {
             init_for_window: std::mem::transmute(sym("gtk_layer_init_for_window")),
             set_layer: std::mem::transmute(sym("gtk_layer_set_layer")),
@@ -793,6 +795,20 @@ button.seg-btn:hover image { opacity: 1; }
 .island-shell-rec { border-color: rgba(244, 63, 94, 0.6); }
 .island-title { font-weight: 650; letter-spacing: -0.15px; }
 .island-timer-rec { font-weight: 650; letter-spacing: 0.2px; }
+.island-countdown { color: #fbbf24; }
+.theme-light .island-countdown { color: #b45309; }
+button.pause-pill { padding: 4px 8px; }
+button.pause-pill-on {
+    padding: 4px 8px;
+    background-color: rgba(251, 191, 36, 0.18);
+    border-color: rgba(251, 191, 36, 0.6);
+    color: #fde68a;
+}
+.theme-light button.pause-pill-on {
+    background-color: rgba(245, 158, 11, 0.14);
+    border-color: rgba(217, 119, 6, 0.55);
+    color: #92400e;
+}
 .section-cap { font-size: 9px; font-weight: 650; letter-spacing: 0.9px; }
 .panel-hint { font-weight: 500; }
 
@@ -865,12 +881,10 @@ button.lens-pill, button.lens-pill-zoomed { font-size: 11.5px; }
 }
 "#;
 
-/// A symbolic icon from the bundled set (`assets/icons`), recolored by GTK
-/// to the widget's text color.
+/// An icon from the bundled set (`assets/icons`) in the widget's text
+/// color; see `symbolic_icon`.
 pub(crate) fn icon(name: &str, size: i32) -> Image {
-    let image = Image::from_icon_name(&format!("hgsr-{name}-symbolic"));
-    image.set_pixel_size(size);
-    image
+    crate::symbolic_icon::image(name, size)
 }
 
 /// A button showing an icon followed by `label` (or just the icon).
@@ -901,6 +915,52 @@ pub(crate) fn set_btn_text(button: &Button, text: &str) {
     match label {
         Some(label) => label.set_text(text),
         None => button.set_label(text),
+    }
+}
+
+/// The newest saved recording in `dir`.
+fn latest_recording(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            name.starts_with("HyperGSR_") && name.ends_with(".mp4") && !name.ends_with(".capture.mp4")
+        })
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+}
+
+/// Renders `widget` (inside `window`) to a PNG, for screenshots in tests
+/// and documentation.
+pub(crate) fn save_widget_png(widget: &impl IsA<gtk4::Widget>, window: &impl IsA<gtk4::Native>, path: &str) {
+    let paintable = gtk4::WidgetPaintable::new(Some(widget));
+    let w = widget.width().max(1);
+    let h = widget.height().max(1);
+    let snap = gtk4::Snapshot::new();
+    gdk4::prelude::PaintableExt::snapshot(&paintable, &snap, w as f64, h as f64);
+    if let Some(node) = snap.to_node() {
+        if let Some(renderer) = gtk4::prelude::NativeExt::renderer(window) {
+            let rect = gtk4::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+            let tex = gtk4::prelude::GskRendererExt::render_texture(&renderer, &node, Some(&rect));
+            let _ = gdk4::prelude::TextureExt::save_to_png(&tex, path);
+        }
+    }
+}
+
+/// Shows Pause, or Continue while paused.
+fn sync_pause_button(button: &Button, image: &Image, paused: bool) {
+    let shortcut = crate::shortcuts::PAUSE_LABEL;
+    if paused {
+        crate::symbolic_icon::set(image, "play");
+        button.set_tooltip_text(Some(&format!("Continue recording ({shortcut})")));
+        button.remove_css_class("pause-pill");
+        button.add_css_class("pause-pill-on");
+    } else {
+        crate::symbolic_icon::set(image, "pause");
+        button.set_tooltip_text(Some(&format!("Pause ({shortcut}); the pause is cut from the video")));
+        button.remove_css_class("pause-pill-on");
+        button.add_css_class("pause-pill");
     }
 }
 
@@ -1060,6 +1120,36 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     resume_btn.add_css_class("shutter-rec");
     resume_btn.set_visible(false);
 
+    // Pauses the running recording; the paused time is cut from the video.
+    let pause_btn = Button::new();
+    let pause_icon = icon("pause", 14);
+    pause_btn.set_child(Some(&pause_icon));
+    pause_btn.add_css_class("pause-pill");
+    pause_btn.set_tooltip_text(Some(&format!("Pause ({})", crate::shortcuts::PAUSE_LABEL)));
+    pause_btn.set_visible(false);
+
+    // Instant replay: starts the buffer, then saves clips of the last seconds.
+    let replay_btn = icon_button("replay", "");
+    replay_btn.add_css_class("theme-pill");
+    replay_btn.set_tooltip_text(Some("Start instant replay: keeps the last seconds so you can save them as a clip"));
+    replay_btn.set_visible(state.lock().settings.replay_sec > 0);
+    let clip_btn = icon_button("replay", "Save clip");
+    clip_btn.add_css_class("shutter-rec");
+    clip_btn.set_visible(false);
+    let replay_stop_btn = Button::new();
+    let replay_stop_icon = Image::from_file(asset_path("icon-stop.svg"));
+    replay_stop_icon.set_pixel_size(12);
+    replay_stop_btn.set_child(Some(&replay_stop_icon));
+    replay_stop_btn.add_css_class("shutter-stop");
+    replay_stop_btn.set_tooltip_text(Some("Stop instant replay"));
+    replay_stop_btn.set_visible(false);
+
+    // Opens the editor on the latest recording.
+    let edit_btn = icon_button("trim", "");
+    edit_btn.add_css_class("theme-pill");
+    edit_btn.set_tooltip_text(Some("Trim the latest recording, or export it vertical, square, WebM, or GIF"));
+    edit_btn.set_visible(latest_recording(&state.lock().videos_dir).is_some());
+
     // 4. Quick Dark / Light Theme Pill
     let theme_btn = Button::new();
     theme_btn.add_css_class("theme-pill");
@@ -1093,7 +1183,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     top_row.append(&zoom_pill_btn);
     top_row.append(&top_spacer);
     top_row.append(&resume_btn);
+    top_row.append(&pause_btn);
     top_row.append(&rec_btn);
+    top_row.append(&replay_btn);
+    top_row.append(&clip_btn);
+    top_row.append(&replay_stop_btn);
+    top_row.append(&edit_btn);
     top_row.append(&theme_btn);
     top_row.append(&expand_btn);
     top_row.append(&close_btn);
@@ -1302,9 +1397,19 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
     vis_card.append(&radar_area);
 
-    let footer_lbl = Label::new(Some("Ready · recordings go to ~/Videos"));
+    let footer_lbl = Label::new(Some(&format!(
+        "Ready · recordings go to {}",
+        crate::studio_panel::display_dir(&state.lock().settings.recordings_dir())
+    )));
     footer_lbl.set_hexpand(true);
     footer_lbl.set_halign(Align::Start);
+    // Long folder names and messages wrap instead of widening the island.
+    footer_lbl.set_wrap(true);
+    footer_lbl.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    footer_lbl.set_lines(2);
+    footer_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    footer_lbl.set_max_width_chars(34);
+    footer_lbl.set_xalign(0.0);
 
     let vis_btn_row = GtkBox::new(Orientation::Horizontal, 6);
     let test_zoom_btn = icon_button("lock", "Lock zoom");
@@ -1325,10 +1430,10 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.tick();
             drop(g);
             if locked {
-                set_btn_text(&btn, "Unlock zoom");
+                set_btn_text(btn, "Unlock zoom");
                 f_lbl.set_text(&format!("Manual Zoom Locked at {target_z:.1}×"));
             } else {
-                set_btn_text(&btn, "Lock zoom");
+                set_btn_text(btn, "Lock zoom");
                 f_lbl.set_text("Manual Zoom Unlocked (1.0× Wide)");
             }
             r_area.queue_draw();
@@ -1655,12 +1760,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let now_learning = !learn_flag.load(Ordering::Relaxed);
             learn_flag.store(now_learning, Ordering::Relaxed);
             if now_learning {
-                set_btn_text(&btn, "● Press Key, Click, or Shake…");
+                set_btn_text(btn, "● Press Key, Click, or Shake…");
                 btn.add_css_class("action-chip");
                 f_lbl.set_text("Listening: Press any key/combo, Mid/Right-click, or Shake cursor!");
             } else {
                 let lbl = st.lock().zoom_cfg.combo_binding.short_label();
-                set_btn_text(&btn, &lbl);
+                set_btn_text(btn, &lbl);
                 f_lbl.set_text(&format!("✓ Zoom Combo: {lbl}"));
             }
         });
@@ -1821,7 +1926,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                     key_name.to_uppercase()
                 };
                 parts.push(short_key);
-                let label = format!("{}", parts.join("+"));
+                let label = parts.join("+");
                 let new_binding = ZoomComboBinding::Custom {
                     ctrl,
                     alt,
@@ -1890,7 +1995,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             };
             let lbl = g.zoom_cfg.combo_action.label();
             drop(g);
-            set_btn_text(&btn, lbl);
+            set_btn_text(btn, lbl);
             f_lbl.set_text(&format!("✓ Combo Behavior: {lbl}"));
         });
     }
@@ -2062,12 +2167,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             g.settings.save();
             drop(g);
             if on {
-                set_btn_text(&btn, "● Auto-Zoom MP4: ON");
+                set_btn_text(btn, "● Auto-Zoom MP4: ON");
                 btn.remove_css_class("toggle-chip");
                 btn.add_css_class("toggle-chip-on");
                 f_lbl.set_text("✓ Auto-Zoom MP4 Post-Pass: ON");
             } else {
-                set_btn_text(&btn, "○ Auto-Zoom MP4: OFF");
+                set_btn_text(btn, "○ Auto-Zoom MP4: OFF");
                 btn.remove_css_class("toggle-chip-on");
                 btn.add_css_class("toggle-chip");
                 f_lbl.set_text("○ Auto-Zoom MP4 Post-Pass: OFF (Raw MP4)");
@@ -2120,11 +2225,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let keep_on_screen = keep_on_screen.clone();
             glib::timeout_add_local_once(Duration::from_millis(80), move || keep_on_screen());
             if expand {
-                set_btn_text(&btn, "Studio ▴");
+                set_btn_text(btn, "Studio ▴");
                 btn.remove_css_class("studio-pill");
                 btn.add_css_class("studio-pill-open");
             } else {
-                set_btn_text(&btn, "Studio ▾");
+                set_btn_text(btn, "Studio ▾");
                 btn.remove_css_class("studio-pill-open");
                 btn.add_css_class("studio-pill");
                 win.set_default_size(1, 1);
@@ -2146,13 +2251,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let r_btn = rec_btn.clone();
         let shell = shell_box.clone();
         let s_lbl = status_lbl.clone();
-        let extras = [theme_btn.clone(), expand_btn.clone(), close_btn.clone()];
+        let extras = [theme_btn.clone(), expand_btn.clone(), close_btn.clone(), edit_btn.clone()];
         let drw = drawer_box.clone();
         let win = window.clone();
         let keep_on_screen = keep_island_on_screen.clone();
         Rc::new(move |recording: bool| {
-            for b in &extras {
+            for b in &extras[..3] {
                 b.set_visible(!recording);
+            }
+            if recording {
+                extras[3].set_visible(false);
             }
             if recording && drw.is_visible() {
                 drw.set_visible(false);
@@ -2234,10 +2342,31 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let busy_flag = bg_zoom_busy.clone();
         let show_recording = show_recording.clone();
         let stop_and_save = stop_and_save.clone();
+        // Set while a cancelled recording lets go of the screen and camera.
+        let discarding = Arc::new(AtomicBool::new(false));
 
         rec_btn.connect_clicked(move |_| {
             if busy_flag.load(Ordering::Relaxed) {
                 footer.set_text("Still saving the last recording…");
+                return;
+            }
+            if discarding.load(Ordering::Relaxed) {
+                footer.set_text("Still closing the cancelled recording…");
+                return;
+            }
+            if st.lock().countdown_left().is_some() {
+                // Stopping before the countdown ends cancels the recording.
+                let Some(job) = st.lock().take_recording() else { return };
+                show_recording(false);
+                s_lbl.remove_css_class("island-countdown");
+                s_lbl.set_text("HyperGSR");
+                footer.set_text("Recording cancelled");
+                discarding.store(true, Ordering::Relaxed);
+                let discarding = discarding.clone();
+                std::thread::spawn(move || {
+                    job.discard();
+                    discarding.store(false, Ordering::Relaxed);
+                });
                 return;
             }
             if st.lock().is_recording() {
@@ -2275,12 +2404,151 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         });
     }
 
-    // `hypergsr --toggle-recording` (the desktop shortcut) lands here.
+    {
+        let st = state.clone();
+        let pause_icon = pause_icon.clone();
+        pause_btn.connect_clicked(move |btn| {
+            let paused = st.lock().toggle_pause();
+            sync_pause_button(btn, &pause_icon, paused);
+        });
+    }
+
+    {
+        let st = state.clone();
+        let app = app.clone();
+        edit_btn.connect_clicked(move |_| {
+            let file = {
+                let g = st.lock();
+                g.last_saved_file.as_ref().map(PathBuf::from).filter(|p| p.is_file()).or_else(|| latest_recording(&g.videos_dir))
+            };
+            if let Some(file) = file {
+                crate::editor::open(&app, &file);
+            }
+        });
+    }
+    // Instant replay. The buffer's look reuses the recording one.
+    let clip_slot: Arc<parking_lot::Mutex<Option<Result<PathBuf, String>>>> = Arc::default();
+    // Set while a clip is being written, so quitting waits for it.
+    let clip_busy = Arc::new(AtomicBool::new(false));
+    let show_replay: Rc<dyn Fn(bool)> = {
+        let show_recording = show_recording.clone();
+        let (rec, replay, clip, stop, edit) =
+            (rec_btn.clone(), replay_btn.clone(), clip_btn.clone(), replay_stop_btn.clone(), edit_btn.clone());
+        let s_lbl = status_lbl.clone();
+        Rc::new(move |on: bool| {
+            show_recording(on);
+            rec.set_visible(!on);
+            replay.set_visible(!on);
+            clip.set_visible(on);
+            stop.set_visible(on);
+            if on {
+                edit.set_visible(false);
+            }
+            s_lbl.set_text(if on { "Starting…" } else { "HyperGSR" });
+        })
+    };
+    {
+        let st = state.clone();
+        let footer = footer_lbl.clone();
+        let show_replay = show_replay.clone();
+        replay_btn.connect_clicked(move |_| {
+            let started = st.lock().start_replay();
+            match started {
+                Ok(()) => {
+                    show_replay(true);
+                    let keep = st.lock().settings.replay_sec;
+                    footer.set_text(&format!(
+                        "● Instant replay is on: Save clip (or {}) keeps the last {} s",
+                        crate::shortcuts::DEFAULT_LABEL,
+                        keep
+                    ));
+                }
+                Err(err) => footer.set_text(&format!("{err:#}")),
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let footer = footer_lbl.clone();
+        let s_lbl = status_lbl.clone();
+        let slot = clip_slot.clone();
+        let clip_busy = clip_busy.clone();
+        clip_btn.connect_clicked(move |btn| {
+            let clip = st.lock().replay_clip();
+            match clip {
+                Ok(clip) => {
+                    btn.set_sensitive(false);
+                    s_lbl.set_text("Saving clip…");
+                    let slot = slot.clone();
+                    clip_busy.store(true, Ordering::Relaxed);
+                    let clip_busy = clip_busy.clone();
+                    std::thread::spawn(move || {
+                        *slot.lock() = Some(clip.save().map_err(|e| format!("{e:#}")));
+                        clip_busy.store(false, Ordering::Relaxed);
+                    });
+                }
+                Err(err) => footer.set_text(&format!("{err:#}")),
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let show_replay = show_replay.clone();
+        let edit = edit_btn.clone();
+        replay_stop_btn.connect_clicked(move |_| {
+            let replay = st.lock().take_replay();
+            if let Some(replay) = replay {
+                std::thread::spawn(move || replay.stop());
+            }
+            show_replay(false);
+            edit.set_visible(latest_recording(&st.lock().videos_dir).is_some());
+        });
+    }
+
+    // `hypergsr --edit <video>` with an island already running.
+    {
+        let action = gio::SimpleAction::new("edit", Some(glib::VariantTy::STRING));
+        let app2 = app.clone();
+        action.connect_activate(move |_, param| {
+            if let Some(path) = param.and_then(|p| p.get::<String>()) {
+                crate::editor::open(&app2, Path::new(&path));
+            }
+        });
+        app.add_action(&action);
+    }
+    if let Some(path) = std::env::var_os("HYPERGSR_EDIT") {
+        let app = app.clone();
+        glib::idle_add_local_once(move || crate::editor::open(&app, Path::new(&path)));
+    }
+
+    // `hypergsr --toggle-recording` and `--pause-recording` (the desktop
+    // shortcuts) land here.
     {
         let action = gio::SimpleAction::new("toggle-record", None);
         let rec = rec_btn.clone();
-        action.connect_activate(move |_, _| rec.emit_clicked());
+        let clip = clip_btn.clone();
+        let st = state.clone();
+        // While instant replay runs, the start/stop shortcut saves a clip.
+        action.connect_activate(move |_, _| {
+            if st.lock().replay_active() {
+                clip.emit_clicked();
+            } else {
+                rec.emit_clicked();
+            }
+        });
         app.add_action(&action);
+        let action = gio::SimpleAction::new("pause-record", None);
+        let pause = pause_btn.clone();
+        action.connect_activate(move |_, _| {
+            if pause.is_visible() {
+                pause.emit_clicked();
+            }
+        });
+        app.add_action(&action);
+    }
+    if std::env::var("HYPERGSR_START_REPLAY").as_deref() == Ok("1") {
+        let replay = replay_btn.clone();
+        glib::timeout_add_local_once(Duration::from_millis(700), move || replay.emit_clicked());
     }
     if std::env::var("HYPERGSR_START_RECORDING").as_deref() == Ok("1") {
         let rec = rec_btn.clone();
@@ -2313,35 +2581,41 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let st = state.clone();
         let win = window.clone();
         let busy_flag = bg_zoom_busy.clone();
+        let clip_busy = clip_busy.clone();
         close_btn.connect_clicked(move |_| {
-            // Save a running recording, and let a render in progress finish,
-            // before quitting; the island hides at once.
+            // Save a running recording, and let a render or a clip in
+            // progress finish, before quitting; the island hides at once.
+            // Instant replay just stops.
+            let replay = st.lock().take_replay();
             let job = st.lock().take_recording();
-            if job.is_none() && !busy_flag.load(Ordering::Relaxed) {
+            let busy = || busy_flag.load(Ordering::Relaxed) || clip_busy.load(Ordering::Relaxed);
+            if job.is_none() && replay.is_none() && !busy() {
                 win.close();
                 return;
             }
             win.set_visible(false);
             let (tx, rx) = std::sync::mpsc::channel::<()>();
-            if let Some(job) = job {
-                std::thread::spawn(move || {
+            std::thread::spawn(move || {
+                if let Some(replay) = replay {
+                    replay.stop();
+                }
+                if let Some(job) = job {
                     let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         job.complete(&AtomicU32::new(0))
                     }));
                     if !matches!(saved, Ok(Ok(_))) {
                         eprintln!("[HyperGSR] Could not save the recording");
                     }
-                    let _ = tx.send(());
-                });
-            } else {
-                drop(tx);
-            }
+                }
+                let _ = tx.send(());
+            });
             let win = win.clone();
             let busy_flag = busy_flag.clone();
+            let clip_busy = clip_busy.clone();
             let mut saved = false;
             glib::timeout_add_local(Duration::from_millis(100), move || {
                 saved = saved || !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
-                if !saved || busy_flag.load(Ordering::Relaxed) {
+                if !saved || busy_flag.load(Ordering::Relaxed) || clip_busy.load(Ordering::Relaxed) {
                     return ControlFlow::Continue;
                 }
                 win.close();
@@ -2355,8 +2629,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let st = state.clone();
         let busy_flag = bg_zoom_busy.clone();
         let close_btn = close_btn.clone();
+        let clip_busy = clip_busy.clone();
         window.connect_close_request(move |_| {
-            let pending = st.lock().is_recording() || busy_flag.load(Ordering::Relaxed);
+            let pending = {
+                let g = st.lock();
+                g.is_recording() || g.replay_active()
+            } || busy_flag.load(Ordering::Relaxed)
+                || clip_busy.load(Ordering::Relaxed);
             if pending {
                 close_btn.emit_clicked();
                 return glib::Propagation::Stop;
@@ -2385,6 +2664,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         let rec_combo_b = record_combo_btn.clone();
         let preset_btns = combo_preset_btns.clone();
         let resume_b = resume_btn.clone();
+        let edit_b = edit_btn.clone();
+        let replay_b = replay_btn.clone();
+        let clip_b = clip_btn.clone();
+        let clip_slot = clip_slot.clone();
+        let show_replay = show_replay.clone();
+        let pause_b = pause_btn.clone();
+        let pause_icon = pause_icon.clone();
+        let mut last_pause_state = (false, false);
+        let mut hidden = false;
+        let mut notified = false;
         let win = window.clone();
         let keep_on_screen = keep_island_on_screen.clone();
         let app_n = app.clone();
@@ -2406,7 +2695,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let Some(mut g) = st.try_lock() else {
                 return ControlFlow::Continue;
             };
-            if !hot && !g.is_recording() && idle_div % 4 != 0 {
+            if !hot && !g.is_recording() && !idle_div.is_multiple_of(4) {
                 return ControlFlow::Continue;
             }
             g.tick();
@@ -2420,6 +2709,12 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             let is_rec = g.is_recording();
             let paused = g.capture_paused.clone();
             let elapsed = g.recording_elapsed_sec();
+            let countdown = g.countdown_left();
+            let user_paused = g.is_paused_by_user();
+            let hide_setting = g.settings.hide_while_recording;
+            let replay_wanted = g.settings.replay_sec > 0;
+            let replay_failure = g.poll_replay_failure();
+            let replay_buffered = g.replay_active().then(|| g.replay_buffered_sec());
 
             // Check if user is in "Record Combo…" self-registration mode and performed a global gesture/button/key
             let mut learned_label: Option<String> = None;
@@ -2483,7 +2778,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                         mouse_button: 0,
                         keycode: kc,
                         shake: false,
-                        label: format!("{}", parts.join("+")),
+                        label: parts.join("+"),
                     })
                 } else {
                     None
@@ -2501,6 +2796,39 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             if let Some(reason) = failure {
                 stop_and_save(Some(reason));
                 return ControlFlow::Continue;
+            }
+            if let Some(reason) = replay_failure {
+                show_replay(false);
+                f_lbl.set_text(&format!("Instant replay stopped: {reason}"));
+            }
+            // The Replay button follows the setting while idle.
+            if replay_buffered.is_none() && !is_rec && replay_b.is_visible() != replay_wanted {
+                replay_b.set_visible(replay_wanted);
+                win.set_default_size(1, 1);
+            }
+            if let Some(saved) = clip_slot.lock().take() {
+                clip_b.set_sensitive(true);
+                last_s_str.clear();
+                match saved {
+                    Ok(path) => {
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        st.lock().last_saved_file = Some(path.display().to_string());
+                        f_lbl.set_text(&format!("Saved {name}"));
+                    }
+                    Err(err) => f_lbl.set_text(&format!("Clip not saved: {err}")),
+                }
+            }
+            if let Some(buffered) = replay_buffered {
+                let new_s = match buffered {
+                    _ if !clip_b.is_sensitive() => "Saving clip…".to_string(),
+                    Some(sec) => format!("● Replay {:02}:{:02}", (sec as u64) / 60, (sec as u64) % 60),
+                    None => "Starting…".to_string(),
+                };
+                if new_s != last_s_str {
+                    s_lbl.set_text(&new_s);
+                    last_s_str = new_s;
+                }
+                wave.queue_draw();
             }
 
             if paused != last_paused {
@@ -2528,6 +2856,48 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 last_paused = paused.clone();
             }
 
+            let can_pause = is_rec && capture_live && paused.is_none() && countdown.is_none();
+            // Out of the video: hidden while really recording, back for the
+            // countdown, pauses (which are cut), and saving.
+            let hide = hide_setting && can_pause && !user_paused;
+            // The way back to a hidden bar: a quiet notification with Stop and
+            // Pause, posted when the capture goes live so a banner shows
+            // during the countdown, which is cut.
+            let notify = hide_setting && is_rec && capture_live;
+            if notify != notified {
+                notified = notify;
+                if notify {
+                    let note = gio::Notification::new("Recording");
+                    note.set_body(Some(&format!(
+                        "{} stops, {} pauses.",
+                        crate::shortcuts::DEFAULT_LABEL,
+                        crate::shortcuts::PAUSE_LABEL
+                    )));
+                    note.set_priority(gio::NotificationPriority::Low);
+                    note.add_button("Stop", "app.toggle-record");
+                    note.add_button("Pause", "app.pause-record");
+                    app_n.send_notification(Some("recording-hidden"), &note);
+                } else {
+                    app_n.withdraw_notification("recording-hidden");
+                }
+            }
+            if hide != hidden {
+                hidden = hide;
+                if hide {
+                    win.set_visible(false);
+                } else {
+                    win.set_visible(true);
+                    let keep_on_screen = keep_on_screen.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(80), move || keep_on_screen());
+                }
+            }
+            if (can_pause, user_paused) != last_pause_state {
+                pause_b.set_visible(can_pause);
+                sync_pause_button(&pause_b, &pause_icon, user_paused);
+                last_pause_state = (can_pause, user_paused);
+                win.set_default_size(1, 1);
+            }
+
             if let Some(lbl) = learned_label {
                 for b in &preset_btns {
                     b.remove_css_class("seg-btn-active");
@@ -2540,7 +2910,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
             ui_div = ui_div.wrapping_add(1);
             // Throttle GTK label/canvas redraws to ~30Hz while keeping telemetry sampling at 60Hz
-            if ui_div % 2 != 0 {
+            if !ui_div.is_multiple_of(2) {
                 return ControlFlow::Continue;
             }
 
@@ -2569,12 +2939,14 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
                         st.lock().last_saved_file = Some(path.display().to_string());
+                        edit_b.set_visible(true);
+                        win.set_default_size(1, 1);
                         s_lbl.set_text("Saved ✓");
                         f_lbl.set_text(&format!("Saved {name}"));
                     }
                     Some(Err(err)) => {
                         s_lbl.set_text("Not saved");
-                        f_lbl.set_text(&format!("{err}"));
+                        f_lbl.set_text(&err);
                     }
                     None => s_lbl.set_text("HyperGSR"),
                 }
@@ -2604,7 +2976,16 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 was_zoomed = is_zoomed;
             }
 
-            if is_rec && paused.is_some() {
+            if let (true, Some(left)) = (is_rec, countdown) {
+                let new_s = format!("Recording in {}", left.ceil() as u32);
+                if new_s != last_s_str {
+                    s_lbl.set_text(&new_s);
+                    s_lbl.add_css_class("island-countdown");
+                    last_s_str = new_s;
+                }
+                wave.queue_draw();
+            } else if is_rec && (paused.is_some() || user_paused) {
+                s_lbl.remove_css_class("island-countdown");
                 let new_s = format!("⏸ Paused {:02}:{:02}", (elapsed as u64) / 60, (elapsed as u64) % 60);
                 if new_s != last_s_str {
                     s_lbl.set_text(&new_s);
@@ -2617,6 +2998,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 }
                 wave.queue_draw();
             } else if is_rec {
+                s_lbl.remove_css_class("island-countdown");
                 let mins = (elapsed as u64) / 60;
                 let secs = (elapsed as u64) % 60;
                 let tenths = ((elapsed * 10.0) as u64) % 10;
@@ -2675,18 +3057,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
             .and_then(|v| v.parse().ok())
             .unwrap_or(650);
         glib::timeout_add_local_once(Duration::from_millis(delay), move || {
-            let paintable = gtk4::WidgetPaintable::new(Some(&shell_shot));
-            let w = shell_shot.width().max(1);
-            let h = shell_shot.height().max(1);
-            let snap = gtk4::Snapshot::new();
-            gdk4::prelude::PaintableExt::snapshot(&paintable, &snap, w as f64, h as f64);
-            if let Some(node) = snap.to_node() {
-                if let Some(renderer) = gtk4::prelude::NativeExt::renderer(&win_shot) {
-                    let rect = gtk4::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
-                    let tex = gtk4::prelude::GskRendererExt::render_texture(&renderer, &node, Some(&rect));
-                    let _ = gdk4::prelude::TextureExt::save_to_png(&tex, &shot_path);
-                }
-            }
+            save_widget_png(&shell_shot, &win_shot, &shot_path);
             win_shot.close();
         });
     }

@@ -3,7 +3,7 @@
 
 use crate::backgrounds::{swatch_colors, PRESETS};
 use crate::gui::{draw_rounded_rect, icon_button, set_active_segment, set_btn_text};
-use crate::settings::{AudioMode, BackgroundKind, CaptureSource, Quality, RecorderSettings};
+use crate::settings::{AudioMode, BackgroundKind, CaptureSource, Quality, RecorderSettings, Webcam};
 use crate::state::SharedStudioState;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, CssProvider, DrawingArea, Label, Orientation};
@@ -27,6 +27,9 @@ button.swatch-active { border-color: #818cf8; }
 }
 "#;
 
+/// Size of the "Large" cursor relative to the desktop's.
+const CURSOR_LARGE: f32 = 1.6;
+
 fn load_css() {
     let provider = CssProvider::new();
     provider.load_from_data(PANEL_CSS);
@@ -48,7 +51,7 @@ fn caption(text: &str) -> Label {
 
 /// A segmented control; `on_pick` runs with the chosen index. A label of
 /// the form `"icon:Text"` gets that icon.
-fn segments(labels: &[&str], active: usize, on_pick: impl Fn(usize) + 'static) -> (GtkBox, Vec<Button>) {
+pub(crate) fn segments(labels: &[&str], active: usize, on_pick: impl Fn(usize) + 'static) -> (GtkBox, Vec<Button>) {
     let track = GtkBox::new(Orientation::Horizontal, 3);
     track.add_css_class("seg-track");
     let buttons: Vec<Button> = labels
@@ -88,6 +91,10 @@ fn update(state: &SharedStudioState, change: impl FnOnce(&mut RecorderSettings))
 fn source_hint(settings: &RecorderSettings) -> String {
     match (settings.source, settings.region) {
         (CaptureSource::Screen, _) => "Records a whole screen".to_string(),
+        // Window zoom follows the window's own cursor track.
+        (CaptureSource::Window, _) if settings.show_cursor && crate::encoder::portal_cursor_metadata() => {
+            "Records one window".to_string()
+        }
         (CaptureSource::Window, _) => "Records one window (auto-zoom off)".to_string(),
         (CaptureSource::Region, Some(r)) => format!(
             "Area {:.0}% × {:.0}% at ({:.0}%, {:.0}%)",
@@ -126,7 +133,7 @@ fn set_active_swatch(buttons: &[Button], active: Option<usize>) {
 }
 
 /// `~/…` for folders under home, so the row stays short.
-fn display_dir(dir: &std::path::Path) -> String {
+pub fn display_dir(dir: &std::path::Path) -> String {
     let home = crate::bundled::home_dir();
     match dir.strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
@@ -301,6 +308,29 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     };
     audio_track.set_hexpand(true);
     audio_row.append(&audio_track);
+    let clean_label = |on: bool| if on { "● Clean" } else { "○ Clean" };
+    let clean_btn = Button::with_label(clean_label(settings.clean_mic));
+    clean_btn.add_css_class(if settings.clean_mic { "toggle-chip-on" } else { "toggle-chip" });
+    clean_btn.set_tooltip_text(Some(
+        "Noise reduction for the microphone: removes fan noise, hum, and hiss, and low rumble",
+    ));
+    {
+        let st = state.clone();
+        let footer = footer.clone();
+        clean_btn.connect_clicked(move |btn| {
+            update(&st, |s| s.clean_mic = !s.clean_mic);
+            let on = st.lock().settings.clean_mic;
+            set_btn_text(btn, clean_label(on));
+            btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
+            btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
+            footer.set_text(if on {
+                "✓ Microphone noise reduction on"
+            } else {
+                "○ The microphone is recorded as is"
+            });
+        });
+    }
+    audio_row.append(&clean_btn);
     rec_card.append(&audio_row);
 
     let quality_row = GtkBox::new(Orientation::Horizontal, 6);
@@ -328,20 +358,210 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
     quality_row.append(&q_track);
     rec_card.append(&quality_row);
 
-    // Start/stop from anywhere with a desktop keybinding.
+    // The cursor is drawn by the studio render when the portal sends it
+    // separately, which smooths its path and allows a larger size.
+    let cursor_row = GtkBox::new(Orientation::Horizontal, 6);
+    cursor_row.append(&crate::gui::icon("cursor", 14));
+    let cursor_idx = match (settings.show_cursor, settings.cursor_scale > 1.2) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+    };
+    let (cursor_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["Hidden", "Normal", "Large"], cursor_idx, move |i| {
+            update(&st, |s| {
+                s.show_cursor = i > 0;
+                s.cursor_scale = if i == 2 { CURSOR_LARGE } else { 1.0 };
+            });
+            let studio = crate::encoder::portal_cursor_metadata();
+            footer.set_text(match (i, studio) {
+                (0, _) => "○ The cursor is left out of recordings",
+                (_, false) => "Your desktop draws the cursor into the video, so it stays as is",
+                (1, true) => "✓ Smooth cursor at its normal size",
+                _ => "✓ Smooth cursor, drawn larger",
+            });
+        })
+    };
+    cursor_track.set_hexpand(true);
+    cursor_track.set_tooltip_text(Some(
+        "When your desktop supports it, the cursor is recorded separately and drawn \
+         back on a smoothed path, so it glides instead of jittering",
+    ));
+    cursor_row.append(&cursor_track);
+    let ripple_label = |on: bool| if on { "● Clicks" } else { "○ Clicks" };
+    let ripple_btn = Button::with_label(ripple_label(settings.click_ripples));
+    ripple_btn.add_css_class(if settings.click_ripples { "toggle-chip-on" } else { "toggle-chip" });
+    let clicks_seen = state.lock().cursor_tracker.reads_mouse_buttons();
+    ripple_btn.set_tooltip_text(Some(if clicks_seen {
+        "Shows a ripple where you click"
+    } else {
+        "Shows a ripple where you click. On Wayland, clicks are only seen when you may read \
+         /dev/input: add yourself to the input group (sudo usermod -aG input $USER) and log in again"
+    }));
+    {
+        let st = state.clone();
+        let footer = footer.clone();
+        ripple_btn.connect_clicked(move |btn| {
+            update(&st, |s| s.click_ripples = !s.click_ripples);
+            let (on, seen) = {
+                let g = st.lock();
+                (g.settings.click_ripples, g.cursor_tracker.reads_mouse_buttons())
+            };
+            set_btn_text(btn, ripple_label(on));
+            btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
+            btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
+            footer.set_text(match (on, seen) {
+                (false, _) => "○ No click ripples",
+                (true, true) => "✓ Clicks show a ripple",
+                (true, false) => "✓ Click ripples on; join the input group so Wayland clicks are seen",
+            });
+        });
+    }
+    cursor_row.append(&ripple_btn);
+    rec_card.append(&cursor_row);
+
+    // The webcam, recorded beside the screen and drawn as a bubble.
+    let webcam_row = GtkBox::new(Orientation::Horizontal, 6);
+    webcam_row.append(&crate::gui::icon("webcam", 14));
+    let camera = crate::webcam::default_device();
+    let webcam_idx = match settings.webcam {
+        Webcam::Off => 0,
+        Webcam::Left => 1,
+        Webcam::Right => 2,
+    };
+    let (webcam_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["No webcam", "Bottom left", "Bottom right"], webcam_idx, move |i| {
+            let corner = [Webcam::Off, Webcam::Left, Webcam::Right][i];
+            update(&st, |s| s.webcam = corner);
+            footer.set_text(if corner == Webcam::Off {
+                "○ No webcam"
+            } else {
+                "✓ Your webcam appears as a round bubble in the saved video"
+            });
+        })
+    };
+    webcam_track.set_hexpand(true);
+    match &camera {
+        Some(cam) => webcam_track.set_tooltip_text(Some(&format!(
+            "Records {} beside the screen and places it as a round bubble when saving",
+            cam.name
+        ))),
+        None => {
+            webcam_track.set_sensitive(false);
+            webcam_track.set_tooltip_text(Some("No webcam found"));
+        }
+    }
+    webcam_row.append(&webcam_track);
+    rec_card.append(&webcam_row);
+
+    // Instant replay keeps the last seconds on disk, ready to save.
+    let replay_row = GtkBox::new(Orientation::Horizontal, 6);
+    replay_row.append(&crate::gui::icon("replay", 14));
+    let replay_idx = match settings.replay_sec {
+        0 => 0,
+        1..=60 => 1,
+        _ => 2,
+    };
+    let (replay_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["No replay", "Last 30 s", "Last 2 min"], replay_idx, move |i| {
+            let sec = [0, 30, 120][i];
+            update(&st, |s| s.replay_sec = sec);
+            footer.set_text(&if sec == 0 {
+                "○ Instant replay off".to_string()
+            } else {
+                format!("✓ The Replay button keeps the last {} on hand to save as a clip", if sec == 30 { "30 seconds" } else { "2 minutes" })
+            });
+        })
+    };
+    replay_track.set_hexpand(true);
+    replay_track.set_tooltip_text(Some(
+        "Instant replay records continuously into a small buffer; Save clip writes the last \
+         seconds to a video, as captured",
+    ));
+    replay_row.append(&replay_track);
+    rec_card.append(&replay_row);
+
+    // A countdown on the running capture, cut from the video afterwards.
+    let countdown_row = GtkBox::new(Orientation::Horizontal, 6);
+    countdown_row.append(&crate::gui::icon("timer", 14));
+    let countdown_idx = match settings.countdown_sec {
+        0 => 0,
+        1..=3 => 1,
+        _ => 2,
+    };
+    let (countdown_track, _) = {
+        let st = state.clone();
+        let footer = footer.clone();
+        segments(&["No countdown", "3 s", "5 s"], countdown_idx, move |i| {
+            let sec = [0, 3, 5][i];
+            update(&st, |s| s.countdown_sec = sec);
+            footer.set_text(&if sec == 0 {
+                "○ Recording starts at once".to_string()
+            } else {
+                format!("✓ Recording starts after a {sec}-second countdown; press Stop during it to cancel")
+            });
+        })
+    };
+    countdown_track.set_hexpand(true);
+    countdown_track.set_tooltip_text(Some("Counts down on the island once the screen share is running"));
+    countdown_row.append(&countdown_track);
+    let hide_label = |on: bool| if on { "● Hide bar" } else { "○ Hide bar" };
+    let hide_btn = Button::with_label(hide_label(settings.hide_while_recording));
+    hide_btn.add_css_class(if settings.hide_while_recording { "toggle-chip-on" } else { "toggle-chip" });
+    hide_btn.set_tooltip_text(Some(&format!(
+        "Hides this bar while recording so it is not in the video. {} stops and {} pauses \
+         (the bar comes back while paused), or use the notification's buttons",
+        crate::shortcuts::DEFAULT_LABEL,
+        crate::shortcuts::PAUSE_LABEL
+    )));
+    {
+        let st = state.clone();
+        let footer = footer.clone();
+        hide_btn.connect_clicked(move |btn| {
+            update(&st, |s| s.hide_while_recording = !s.hide_while_recording);
+            let on = st.lock().settings.hide_while_recording;
+            set_btn_text(btn, hide_label(on));
+            btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
+            btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
+            footer.set_text(&if on {
+                format!(
+                    "✓ The bar hides while recording; {} stops, {} pauses",
+                    crate::shortcuts::DEFAULT_LABEL,
+                    crate::shortcuts::PAUSE_LABEL
+                )
+            } else {
+                "○ The bar stays on screen while recording".to_string()
+            });
+        });
+    }
+    countdown_row.append(&hide_btn);
+    rec_card.append(&countdown_row);
+
+    // Start/stop and pause from anywhere with desktop keybindings.
     let shortcut_row = GtkBox::new(Orientation::Horizontal, 6);
     shortcut_row.append(&crate::gui::icon("shortcut", 14));
-    let shortcut_lbl = Label::new(Some(&format!("Start / stop  {}", crate::shortcuts::DEFAULT_LABEL)));
+    let shortcut_lbl = Label::new(Some(&format!(
+        "Record {}  ·  Pause {}",
+        crate::shortcuts::DEFAULT_LABEL,
+        crate::shortcuts::PAUSE_LABEL
+    )));
     shortcut_lbl.add_css_class("panel-hint");
     shortcut_lbl.set_hexpand(true);
     shortcut_lbl.set_halign(Align::Start);
     shortcut_row.append(&shortcut_lbl);
-    let ready = crate::shortcuts::installed();
+    let ready = crate::shortcuts::all_installed();
     let shortcut_btn = icon_button(if ready { "check" } else { "keyboard" }, if ready { "Ready" } else { "Set up" });
     shortcut_btn.add_css_class(if ready { "toggle-chip-on" } else { "action-chip" });
     shortcut_btn.set_tooltip_text(Some(&format!(
-        "Adds {} to your desktop shortcuts. It runs: {}",
+        "Adds {} (start / stop) and {} (pause) to your desktop shortcuts. Start / stop runs: {}",
         crate::shortcuts::DEFAULT_LABEL,
+        crate::shortcuts::PAUSE_LABEL,
         crate::shortcuts::toggle_command()
     )));
     {
@@ -540,7 +760,7 @@ pub fn build(state: &SharedStudioState, footer: &Label) -> GtkBox {
         shadow_btn.connect_clicked(move |btn| {
             update(&st, |s| s.background.shadow = !s.background.shadow);
             let on = st.lock().settings.background.shadow;
-            set_btn_text(&btn, if on { "● Shadow" } else { "○ Shadow" });
+            set_btn_text(btn, if on { "● Shadow" } else { "○ Shadow" });
             btn.remove_css_class(if on { "toggle-chip" } else { "toggle-chip-on" });
             btn.add_css_class(if on { "toggle-chip-on" } else { "toggle-chip" });
         });

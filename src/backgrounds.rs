@@ -108,6 +108,20 @@ impl ContentRect {
         let radius = ((w.min(h) as f32 * radius.clamp(0.0, 0.08)).round() as usize).min(w.min(h) / 2);
         Self { x, y, w, h, radius }
     }
+
+    /// Fits a `src_w` x `src_h` recording, keeping its shape, into a canvas
+    /// of another shape, inset by `padding` on every side.
+    pub fn fit(canvas_w: usize, canvas_h: usize, src_w: usize, src_h: usize, padding: f32, radius: f32) -> Self {
+        let inset = (1.0 - 2.0 * padding.clamp(0.0, 0.2)) as f64;
+        let scale = (canvas_w as f64 * inset / src_w.max(1) as f64).min(canvas_h as f64 * inset / src_h.max(1) as f64);
+        let even = |v: f64, max: usize| (((v / 2.0).round() as usize) * 2).clamp(2, max & !1);
+        let w = even(src_w as f64 * scale, canvas_w);
+        let h = even(src_h as f64 * scale, canvas_h);
+        let x = ((canvas_w - w) / 2) & !1;
+        let y = ((canvas_h - h) / 2) & !1;
+        let radius = ((w.min(h) as f32 * radius.clamp(0.0, 0.08)).round() as usize).min(w.min(h) / 2);
+        Self { x, y, w, h, radius }
+    }
 }
 
 fn srgb_to_linear(c: u8) -> f32 {
@@ -206,7 +220,7 @@ fn render_image(path: &std::path::Path, w: usize, h: usize, out: &mut [u8]) -> R
     let cropped = image::imageops::crop_imm(&img, cx, cy, crop_w, crop_h).to_image();
     let resized =
         image::imageops::resize(&cropped, w as u32, h as u32, image::imageops::FilterType::CatmullRom);
-    for (dst, src) in out.chunks_exact_mut(4).zip(resized.pixels()) {
+    for (dst, src) in out.as_chunks_mut::<4>().0.iter_mut().zip(resized.pixels()) {
         dst[..3].copy_from_slice(&src.0);
         dst[3] = 255;
     }
@@ -314,6 +328,18 @@ pub fn swatch_colors(preset: &Preset) -> ([f64; 3], [f64; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wide_recording_fits_a_vertical_canvas() {
+        let r = ContentRect::fit(1080, 1920, 1920, 1080, 0.0, 0.0);
+        assert_eq!((r.x, r.w), (0, 1080));
+        assert_eq!(r.h, 608);
+        assert_eq!(r.y, (1920 - 608) / 2);
+        let padded = ContentRect::fit(1080, 1080, 1920, 1080, 0.05, 0.02);
+        assert!(padded.w <= 972 && padded.x >= 54 && padded.x.is_multiple_of(2) && padded.y.is_multiple_of(2));
+        // Same shape: matches the plain inset.
+        assert_eq!(ContentRect::fit(1920, 1080, 1920, 1080, 0.06, 0.0), ContentRect::framed(1920, 1080, 0.06, 0.0));
+    }
 
     #[test]
     fn framed_rect_is_centered_even_and_keeps_aspect() {

@@ -76,6 +76,19 @@ pub struct StudioState {
     parts_elapsed_sec: f32,
     /// The file the joined recording is captured to, and how.
     capture_target: Option<(PathBuf, CaptureOptions)>,
+    /// Video-time ranges of the running part to leave out: the countdown
+    /// and finished pauses.
+    part_cuts: Vec<(f64, f64)>,
+    /// Video time of the running part when Pause was pressed.
+    paused_at: Option<f64>,
+    /// Seconds to count down once the first part is running.
+    countdown_pending: u32,
+    /// When the countdown ends.
+    countdown_end: Option<Instant>,
+    /// Records the webcam beside the screen.
+    webcam: Option<crate::webcam::WebcamRecorder>,
+    /// The instant-replay buffer, while it runs.
+    replay: Option<crate::replay::ReplayBuffer>,
     /// Lazy-allocated buffers used ONLY when `--web` requests a rendered JPEG frame
     lazy_web_buffers: Option<(ScreenCapturer, FrameBuffer, FrameBuffer)>,
 }
@@ -93,8 +106,10 @@ impl StudioState {
         let settings = RecorderSettings::load();
         let videos_dir = settings.recordings_dir();
         std::fs::create_dir_all(&videos_dir).ok();
-        let mut zoom_cfg = ZoomConfig::default();
-        zoom_cfg.enabled = settings.auto_zoom;
+        let zoom_cfg = ZoomConfig {
+            enabled: settings.auto_zoom,
+            ..Default::default()
+        };
 
         Self {
             start_instant: Instant::now(),
@@ -125,6 +140,12 @@ impl StudioState {
             capture_paused: None,
             parts_elapsed_sec: 0.0,
             capture_target: None,
+            part_cuts: Vec::new(),
+            paused_at: None,
+            countdown_pending: 0,
+            countdown_end: None,
+            webcam: None,
+            replay: None,
             lazy_web_buffers: None,
         }
     }
@@ -133,12 +154,68 @@ impl StudioState {
         self.start_instant.elapsed().as_millis() as u64
     }
 
+    /// Recorded time that will be in the video: the countdown and pauses
+    /// do not count.
     pub fn recording_elapsed_sec(&self) -> f32 {
-        self.parts_elapsed_sec
-            + self
-                .recording_start
-                .map(|t| t.elapsed().as_secs_f32())
-                .unwrap_or(0.0)
+        let live = self.live_video_sec().map_or(0.0, |t| (t - self.cut_sec(t)).max(0.0));
+        self.parts_elapsed_sec + live as f32
+    }
+
+    /// Video time of the running part, once its first frame is captured.
+    fn live_video_sec(&self) -> Option<f64> {
+        self.recording_start.map(|t| t.elapsed().as_secs_f64())
+    }
+
+    /// How much of the running part's first `upto` seconds is cut.
+    fn cut_sec(&self, upto: f64) -> f64 {
+        cut_total(&self.part_cuts, upto) + self.paused_at.map_or(0.0, |p| (upto - p).max(0.0))
+    }
+
+    /// Seconds left before recording starts for real, while counting down.
+    pub fn countdown_left(&self) -> Option<f32> {
+        self.encoder_session.as_ref()?;
+        let left = self.countdown_end?.saturating_duration_since(Instant::now()).as_secs_f32();
+        (left > 0.0).then_some(left)
+    }
+
+    /// Paused with the Pause button (the capture keeps running; the paused
+    /// time is cut from the video).
+    pub fn is_paused_by_user(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Pauses or continues the running recording, and returns whether it is
+    /// paused now. Does nothing before the countdown is over.
+    pub fn toggle_pause(&mut self) -> bool {
+        let Some(t) = self.live_video_sec() else {
+            return false;
+        };
+        if self.encoder_session.is_none() || self.countdown_left().is_some() {
+            return self.paused_at.is_some();
+        }
+        let now = self.now_ms();
+        match self.paused_at.take() {
+            Some(from) => {
+                self.part_cuts.push((from, t));
+                self.cursor_tracker.push_keystroke("● REC Continued", now);
+                false
+            }
+            None => {
+                self.paused_at = Some(t);
+                self.cursor_tracker.push_keystroke("⏸ Paused", now);
+                true
+            }
+        }
+    }
+
+    /// The running part's cuts, with an open pause running to its end.
+    fn take_part_cuts(&mut self) -> Vec<(f64, f64)> {
+        let mut cuts = std::mem::take(&mut self.part_cuts);
+        if let Some(from) = self.paused_at.take() {
+            cuts.push((from, f64::INFINITY));
+        }
+        self.countdown_end = None;
+        cuts
     }
 
     /// A recording is running, possibly paused after a broken screen share.
@@ -225,6 +302,13 @@ impl StudioState {
         // after Record while the portal starts; telemetry waits for it.
         if self.recording_start.is_none() {
             self.recording_start = self.encoder_session.as_ref().and_then(|s| s.ready_at());
+            // The countdown runs on a live capture, so recording starts the
+            // moment it ends; the counted seconds are cut from the video.
+            if let (Some(start), n @ 1..) = (self.recording_start, self.countdown_pending) {
+                self.countdown_pending = 0;
+                self.countdown_end = Some(start + std::time::Duration::from_secs(u64::from(n)));
+                self.part_cuts.push((0.0, f64::from(n)));
+            }
         }
         let Some(rec_start) = self.recording_start else {
             return;
@@ -262,7 +346,8 @@ impl StudioState {
     /// Ends the current part when the stream stopped sending images while
     /// the cursor kept moving on the recorded monitor: the portal died
     /// without closing the stream. A still screen with a still cursor is
-    /// left alone. Only an embedded cursor redraws the screen when it moves.
+    /// left alone. A moving cursor shows up in the stream either way: drawn
+    /// into the image, or as cursor metadata the helper counts as activity.
     fn detect_frozen_capture(&mut self, now_ms: u64, off_capture: bool) {
         // The helper reports a stall after this long without a new image.
         const STALL_REPORT_MS: u64 = 3_000;
@@ -338,7 +423,83 @@ impl StudioState {
         (x, y, Default::default())
     }
 
+    /// Whether the saved settings record the webcam (read before the state
+    /// exists, to probe the camera early).
+    pub fn webcam_wanted() -> bool {
+        RecorderSettings::load().webcam != crate::settings::Webcam::Off
+    }
+
+    /// How the next capture records, from the current settings.
+    fn capture_options(&self) -> CaptureOptions {
+        let settings = &self.settings;
+        CaptureOptions {
+            fps: settings.fps,
+            quality: settings.quality,
+            audio: settings.audio,
+            source: settings.source,
+            region: settings.active_region(),
+            show_cursor: settings.show_cursor,
+            studio_cursor: crate::encoder::portal_cursor_metadata()
+                && std::env::var_os("HYPERGSR_NATIVE_CURSOR").is_none(),
+            repick: self.repick_source,
+            clean_mic: settings.clean_mic,
+        }
+    }
+
+    /// Starts the instant-replay buffer.
+    pub fn start_replay(&mut self) -> Result<()> {
+        if self.is_recording() || self.replay.is_some() {
+            anyhow::bail!("a capture is already running");
+        }
+        let keep = self.settings.replay_sec.max(5);
+        self.replay = Some(crate::replay::ReplayBuffer::start(&self.capture_options(), keep)?);
+        self.repick_source = false;
+        Ok(())
+    }
+
+    pub fn replay_active(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// Seconds buffered so far (up to what a clip keeps), once capturing.
+    pub fn replay_buffered_sec(&self) -> Option<f32> {
+        let replay = self.replay.as_ref()?;
+        let since = replay.session.ready_at()?.elapsed().as_secs_f32();
+        Some(since.min(replay.keep_sec as f32))
+    }
+
+    /// A clip of the last seconds, to save with [`crate::replay::ReplayClip::save`].
+    pub fn replay_clip(&self) -> Result<crate::replay::ReplayClip> {
+        let Some(replay) = self.replay.as_ref() else {
+            anyhow::bail!("instant replay is not running");
+        };
+        if replay.session.ready_at().is_none() {
+            anyhow::bail!("the screen share has not started yet");
+        }
+        replay.clip(&self.videos_dir)
+    }
+
+    /// Detaches the replay buffer; [`crate::replay::ReplayBuffer::stop`] it
+    /// off the UI thread.
+    pub fn take_replay(&mut self) -> Option<crate::replay::ReplayBuffer> {
+        self.replay.take()
+    }
+
+    /// Why the replay buffer's capture ended on its own, if it did.
+    pub fn poll_replay_failure(&mut self) -> Option<String> {
+        let exit = self.replay.as_mut()?.session.poll_exit()?;
+        if let Some(replay) = self.replay.take() {
+            std::thread::spawn(move || replay.stop());
+        }
+        Some(match exit {
+            CaptureExit::Interrupted(reason) | CaptureExit::Failed(reason) => reason,
+        })
+    }
+
     pub fn start_recording(&mut self) -> Result<PathBuf> {
+        if self.replay.is_some() {
+            anyhow::bail!("stop instant replay first");
+        }
         if self.is_recording() {
             self.stop_recording()?;
         }
@@ -355,16 +516,8 @@ impl StudioState {
                     && std::fs::OpenOptions::new().write(true).create_new(true).open(p).is_ok()
             })
             .expect("an unused file name");
+        let options = self.capture_options();
         let settings = &self.settings;
-        let options = CaptureOptions {
-            fps: settings.fps,
-            quality: settings.quality,
-            audio: settings.audio,
-            source: settings.source,
-            region: settings.active_region(),
-            show_cursor: settings.show_cursor,
-            repick: self.repick_source,
-        };
         let session = match ActiveEncoderSession::start_capture(&capture_path, &options) {
             Ok(session) => session,
             Err(err) => {
@@ -373,6 +526,16 @@ impl StudioState {
             }
         };
         self.repick_source = false;
+        self.webcam = None;
+        if settings.webcam != crate::settings::Webcam::Off {
+            match crate::webcam::default_device() {
+                Some(device) => match crate::webcam::WebcamRecorder::start(&device.path, &webcam_path(&capture_path)) {
+                    Ok(cam) => self.webcam = Some(cam),
+                    Err(err) => eprintln!("[HyperGSR] {err:#}; recording without the webcam"),
+                },
+                None => eprintln!("[HyperGSR] no webcam found; recording without it"),
+            }
+        }
         self.recording_settings = Some(settings.clone());
         self.target_fps = settings.fps;
         self.recording_start = None;
@@ -380,6 +543,10 @@ impl StudioState {
         self.recorded_parts.clear();
         self.capture_paused = None;
         self.parts_elapsed_sec = 0.0;
+        self.part_cuts.clear();
+        self.paused_at = None;
+        self.countdown_end = None;
+        self.countdown_pending = settings.countdown_sec;
         self.capture_target = Some((capture_path.clone(), CaptureOptions { repick: false, ..options }));
         self.cursor_tracker
             .push_keystroke("● REC Started (Zero-Copy GPU)", self.now_ms());
@@ -435,9 +602,13 @@ impl StudioState {
         let Some(session) = self.encoder_session.take() else {
             return;
         };
-        let live_sec = self.recording_start.take().map(|t| t.elapsed().as_secs_f64());
-        let done = session.finish_capture();
-        self.parts_elapsed_sec += done.keep_sec.or(live_sec).unwrap_or(0.0) as f32;
+        let live_sec = self.live_video_sec();
+        let cuts = self.take_part_cuts();
+        self.recording_start = None;
+        let mut done = session.finish_capture();
+        let kept = done.keep_sec.or(live_sec).unwrap_or(0.0);
+        self.parts_elapsed_sec += (kept - cut_total(&cuts, kept)).max(0.0) as f32;
+        done.cuts = cuts;
         self.recorded_parts.push(done);
     }
 
@@ -447,6 +618,9 @@ impl StudioState {
         if !self.is_recording() {
             return None;
         }
+        let before_start = self.countdown_left().is_some();
+        let live_cuts = self.take_part_cuts();
+        self.countdown_pending = 0;
         let session = self.encoder_session.take();
         let parts = std::mem::take(&mut self.recorded_parts);
         let capture = self
@@ -472,10 +646,11 @@ impl StudioState {
         Some(StopJob {
             parts,
             session,
+            webcam: self.webcam.take(),
+            live_cuts,
+            before_start,
             capture,
-            auto_zoom: self.auto_apply_zoom_on_stop
-                && settings.auto_zoom
-                && settings.source != CaptureSource::Window,
+            auto_zoom: self.auto_apply_zoom_on_stop && settings.auto_zoom,
             settings,
         })
     }
@@ -539,6 +714,11 @@ pub struct StopJob {
     /// Earlier parts of a recording whose screen share broke.
     parts: Vec<FinishedCapture>,
     session: Option<ActiveEncoderSession>,
+    /// Cuts of the running part.
+    live_cuts: Vec<(f64, f64)>,
+    /// Stopped during the countdown: nothing was recorded yet.
+    before_start: bool,
+    webcam: Option<crate::webcam::WebcamRecorder>,
     /// Where the whole recording's capture goes.
     capture: PathBuf,
     auto_zoom: bool,
@@ -550,14 +730,46 @@ impl StopJob {
     /// MP4 to show the user. A failed render falls back to the plain capture,
     /// so a recording is never lost to a post-processing error.
     pub fn complete(self, progress: &AtomicU32) -> Result<PathBuf> {
+        if self.before_start {
+            self.discard();
+            anyhow::bail!("the recording stopped before the countdown ended");
+        }
         let mut parts = self.parts;
         if let Some(session) = self.session {
-            parts.push(session.finish_capture());
+            let mut live = session.finish_capture();
+            live.cuts = self.live_cuts;
+            parts.push(live);
         }
-        let done = join_parts(parts, &self.capture)?;
+        let done = join_parts(parts, &self.capture);
+        let webcam = self.webcam.and_then(|cam| cam.finish());
+        let done = match done {
+            Ok(done) => done,
+            Err(err) => {
+                if let Some((path, _)) = webcam {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(err);
+            }
+        };
+        let webcam = webcam.and_then(|(path, start)| {
+            if done.clock.is_empty() {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+            Some(crate::webcam::WebcamClip {
+                path,
+                start,
+                clock: done.clock.clone(),
+                corner: self.settings.webcam,
+                size: self.settings.webcam_size,
+            })
+        });
         let capture = done.path;
         if !capture.exists() || std::fs::metadata(&capture).is_ok_and(|m| m.len() == 0) {
             let _ = std::fs::remove_file(&capture);
+            if let Some(cam) = &webcam {
+                let _ = std::fs::remove_file(&cam.path);
+            }
             anyhow::bail!(done.error.unwrap_or_else(|| "nothing was recorded".to_string()));
         }
         if let Some(err) = &done.error {
@@ -566,31 +778,96 @@ impl StopJob {
         save_telemetry(&capture, &done.zoom_events);
 
         let output = final_path(&capture);
+        let cursor = done.cursor.filter(|c| c.is_useful());
+        // Live telemetry is screen-wide, so a window is only zoomed by its
+        // own cursor track.
+        let zoomable = self.settings.source != CaptureSource::Window || cursor.is_some();
+        let auto_zoom = self.auto_zoom && zoomable;
         let job = RenderJob {
             capture: capture.clone(),
             output: output.clone(),
             events: done.zoom_events,
-            auto_zoom: self.auto_zoom,
+            auto_zoom,
             region: self.settings.active_region(),
             background: self.settings.background.clone(),
             quality: self.settings.quality,
             fps: self.settings.fps,
+            // Screen-wide click positions mean nothing inside a window.
+            click_ripples: self.settings.click_ripples
+                && (self.settings.source != CaptureSource::Window || cursor.is_some()),
+            cursor,
+            cursor_scale: self.settings.cursor_scale,
+            cuts: done.cuts,
+            aspect: Default::default(),
+            format: Default::default(),
+            webcam,
         };
+        // What the cuts (countdown, pauses) leave of the capture.
+        let kept = (!job.cuts.is_empty())
+            .then(|| crate::ffmpeg::probe_video(&capture).ok())
+            .flatten()
+            .map(|info| {
+                let video_sec = (info.duration_sec - info.video_start_sec).max(0.0);
+                (studio_render::kept_ranges(&job.cuts, video_sec), info.video_start_sec)
+            });
+        if kept.as_ref().is_some_and(|(k, _)| k.iter().map(|(a, b)| b - a).sum::<f64>() < 0.1) {
+            // Stopped during the countdown: there is nothing to keep.
+            let _ = std::fs::remove_file(&capture);
+            if let Some(cam) = &job.webcam {
+                let _ = std::fs::remove_file(&cam.path);
+            }
+            anyhow::bail!("the recording stopped before the countdown ended");
+        }
         let result = studio_render::render(&job, progress).or_else(|err| {
             eprintln!("[HyperGSR] {err:#}; saving the recording without effects");
-            crate::ffmpeg::remux_to_mp4(&capture, &output).map(|_| output.clone())
+            match &kept {
+                // Paused or counted-down footage must not reach the video.
+                Some((kept, video_start)) => crate::ffmpeg::cut_to_mp4(&capture, &output, kept, *video_start),
+                None if job.cuts.is_empty() => crate::ffmpeg::remux_to_mp4(&capture, &output),
+                None => Err(anyhow::anyhow!("cannot read the capture to cut it")),
+            }
+            .map(|_| output.clone())
         });
         match result {
             Ok(path) => {
-                let _ = std::fs::remove_file(&capture);
+                // The capture stays editable for a while; see `project`.
+                crate::project::keep(&job, zoomable);
                 Ok(path)
             }
-            // The fragmented capture plays as is; hand it over under the final name.
             Err(err) => {
-                eprintln!("[HyperGSR] {err:#}; keeping the raw capture");
+                if let Some(cam) = &job.webcam {
+                    let _ = std::fs::remove_file(&cam.path);
+                }
                 let _ = std::fs::remove_file(&output);
-                Ok(std::fs::rename(&capture, &output).map_or(capture, |_| output))
+                if job.cuts.is_empty() {
+                    // The fragmented capture plays as is; hand it over under the final name.
+                    eprintln!("[HyperGSR] {err:#}; keeping the raw capture");
+                    return Ok(std::fs::rename(&capture, &output).map_or(capture, |_| output));
+                }
+                // Not under the final name: it still holds the cut parts.
+                let uncut = output.with_extension("uncut.mp4");
+                let kept_at = if std::fs::rename(&capture, &uncut).is_ok() { uncut } else { capture };
+                anyhow::bail!(
+                    "{err:#}; the full capture, including the countdown and pauses, is in {}",
+                    kept_at.display()
+                )
             }
+        }
+    }
+
+    /// Stops the capture and deletes everything it wrote (a recording
+    /// cancelled during its countdown).
+    pub fn discard(self) {
+        if let Some(cam) = self.webcam {
+            cam.discard();
+        }
+        let mut paths: Vec<PathBuf> = self.parts.into_iter().map(|p| p.path).collect();
+        if let Some(session) = self.session {
+            paths.push(session.finish_capture().path);
+        }
+        paths.push(self.capture);
+        for path in paths {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -608,23 +885,33 @@ fn part_path(capture: &Path, n: usize) -> PathBuf {
 
 /// Where a part sits in the joined video: the file time its first frame
 /// has, and the file time it is kept up to.
+#[derive(Clone, Copy)]
 struct PartSpan {
     video_start: f64,
     kept: f64,
 }
 
-/// Moves each part's telemetry (timed from its own first frame) onto the
-/// joined video's timeline, which is timed from the first part's first frame.
-fn merge_part_events(parts: &[(PartSpan, Vec<RecordedZoomEvent>)]) -> Vec<RecordedZoomEvent> {
-    let Some(first) = parts.first() else {
-        return Vec::new();
-    };
-    let base = first.0.video_start;
+/// For each part, how far its telemetry (timed from its own first frame)
+/// moves on the joined video's timeline, which is timed from the first
+/// part's first frame, and the last of its own time that was kept.
+fn part_shifts(spans: &[PartSpan]) -> Vec<(f64, f64)> {
+    let base = spans.first().map_or(0.0, |s| s.video_start);
     let mut offset = 0.0f64;
+    spans
+        .iter()
+        .map(|span| {
+            let shift = offset + span.video_start - base;
+            offset += span.kept;
+            (shift, span.kept - span.video_start)
+        })
+        .collect()
+}
+
+/// Moves each part's telemetry onto the joined video's timeline.
+fn merge_part_events(parts: &[(PartSpan, Vec<RecordedZoomEvent>)]) -> Vec<RecordedZoomEvent> {
+    let spans: Vec<PartSpan> = parts.iter().map(|(s, _)| *s).collect();
     let mut merged = Vec::new();
-    for (span, events) in parts {
-        let shift = offset + span.video_start - base;
-        let last = span.kept - span.video_start;
+    for ((shift, last), (_, events)) in part_shifts(&spans).into_iter().zip(parts) {
         merged.extend(
             events
                 .iter()
@@ -634,7 +921,6 @@ fn merge_part_events(parts: &[(PartSpan, Vec<RecordedZoomEvent>)]) -> Vec<Record
                     ..*e
                 }),
         );
-        offset += span.kept;
     }
     merged
 }
@@ -691,6 +977,20 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
         }
         return Ok(first);
     }
+    let mut cursor: Option<crate::cursor_track::CursorTrack> = None;
+    let mut cuts = Vec::new();
+    let mut clock = Vec::new();
+    for ((shift, last), part) in part_shifts(&spans).into_iter().zip(parts.iter_mut()) {
+        if let Some(track) = part.cursor.take() {
+            cursor.get_or_insert_with(Default::default).append_shifted(track, shift, last);
+        }
+        cuts.extend(shift_cuts(&part.cuts, shift, last));
+        clock.extend(part.clock.iter().map(|s| crate::webcam::ClockSpan {
+            shift: shift + s.shift,
+            zero: s.zero,
+            last: s.last.min(last),
+        }));
+    }
     let paired: Vec<_> = spans
         .into_iter()
         .zip(parts.iter().map(|p| p.zoom_events.clone()))
@@ -703,7 +1003,32 @@ fn join_parts(parts: Vec<FinishedCapture>, capture: &Path) -> Result<FinishedCap
         zoom_events: merge_part_events(&paired),
         error: last_error,
         keep_sec: None,
+        cursor,
+        cuts,
+        clock,
     })
+}
+
+/// How much of the first `upto` seconds `cuts` leave out.
+fn cut_total(cuts: &[(f64, f64)], upto: f64) -> f64 {
+    cuts.iter().map(|&(a, b)| (b.min(upto) - a).max(0.0)).sum()
+}
+
+/// Moves a part's cuts onto the joined timeline, dropping what lies past
+/// the part's kept end.
+fn shift_cuts(cuts: &[(f64, f64)], shift: f64, last: f64) -> Vec<(f64, f64)> {
+    cuts.iter()
+        .filter(|(a, _)| *a < last)
+        .map(|&(a, b)| (shift + a, shift + b.min(last)))
+        .collect()
+}
+
+/// `HyperGSR_<time>.capture.mp4` records the webcam to
+/// `HyperGSR_<time>.webcam.mkv`.
+fn webcam_path(capture: &Path) -> PathBuf {
+    let name = capture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = name.strip_suffix(CAPTURE_SUFFIX).unwrap_or(&name);
+    capture.with_file_name(format!("{stem}.webcam.mkv"))
 }
 
 /// `HyperGSR_<time>.capture.mp4` becomes `HyperGSR_<time>.mp4`.
@@ -777,6 +1102,18 @@ mod tests {
         for (t, want) in times.iter().zip(expected) {
             assert!((t - want).abs() < 1e-3, "{times:?}");
         }
+    }
+
+    #[test]
+    fn part_cuts_follow_the_joined_timeline() {
+        let spans = [PartSpan { video_start: 0.2, kept: 65.1 }, PartSpan { video_start: 0.1, kept: 10.0 }];
+        let shifts = part_shifts(&spans);
+        // A countdown in the first part; a pause left open in the second.
+        assert_eq!(shift_cuts(&[(0.0, 3.0)], shifts[0].0, shifts[0].1), vec![(0.0, 3.0)]);
+        let (shift, last) = shifts[1];
+        let cut = shift_cuts(&[(4.0, f64::INFINITY), (20.0, 30.0)], shift, last);
+        assert_eq!(cut.len(), 1);
+        assert!((cut[0].0 - 69.0).abs() < 1e-9 && (cut[0].1 - 74.9).abs() < 1e-9, "{cut:?}");
     }
 
     #[test]

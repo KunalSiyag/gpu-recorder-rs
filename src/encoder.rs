@@ -113,6 +113,8 @@ pub enum RecordingEngineKind {
 pub struct CaptureStatus {
     /// When the first frame reached the encoder: time zero of the video.
     pub ready_at: Option<Instant>,
+    /// The same moment on CLOCK_MONOTONIC, in seconds.
+    pub ready_mono: Option<f64>,
     pub size: Option<(u32, u32)>,
     pub error: Option<String>,
     /// FFmpeg's pid, which is also its process group.
@@ -141,8 +143,41 @@ pub struct CaptureOptions {
     pub source: CaptureSource,
     pub region: Option<Region>,
     pub show_cursor: bool,
+    /// Record the cursor beside the video (see `cursor_track`) so the
+    /// studio render can draw it smoothed; needs [`portal_cursor_metadata`].
+    pub studio_cursor: bool,
     /// Ignore the remembered portal selection and show the picker again.
     pub repick: bool,
+    /// Filter noise out of the microphone.
+    pub clean_mic: bool,
+}
+
+/// Whether the screen-cast portal can send the cursor as metadata instead
+/// of drawing it into the frames. Asked once per run.
+pub fn portal_cursor_metadata() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        use gio::prelude::*;
+        const METADATA: u32 = 4;
+        let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+            return false;
+        };
+        bus.call_sync(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            Some(&("org.freedesktop.portal.ScreenCast", "AvailableCursorModes").to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            3000,
+            gio::Cancellable::NONE,
+        )
+        .ok()
+        .and_then(|reply| reply.child_value(0).as_variant())
+        .and_then(|modes| modes.get::<u32>())
+        .is_some_and(|modes| modes & METADATA != 0)
+    })
 }
 
 /// Result of stopping a capture.
@@ -153,9 +188,15 @@ pub struct FinishedCapture {
     pub error: Option<String>,
     /// Video time after which the capture only repeats a frozen frame.
     pub keep_sec: Option<f64>,
+    /// The cursor, when it was recorded beside the video.
+    pub cursor: Option<crate::cursor_track::CursorTrack>,
+    /// Video-time ranges to leave out: the countdown and pauses.
+    pub cuts: Vec<(f64, f64)>,
+    /// When video time was captured on CLOCK_MONOTONIC, to line up the webcam.
+    pub clock: Vec<crate::webcam::ClockSpan>,
 }
 
-const HELPER_PROTOCOL: &str = "4";
+const HELPER_PROTOCOL: &str = "6";
 /// The helper's exit code after it reported LOST.
 const EXIT_STREAM_LOST: i32 = 6;
 
@@ -170,13 +211,17 @@ pub struct ActiveEncoderSession {
     pub zoom_events: Vec<RecordedZoomEvent>,
     /// Set when the recorder itself ended a capture whose stream froze.
     interrupted: Option<(f64, String)>,
+    /// Where the helper writes the cursor, in studio-cursor mode.
+    cursor_track: Option<PathBuf>,
 }
 
 /// Applies one line of the helper's stdout protocol.
 fn apply_helper_line(st: &mut CaptureStatus, line: &str) {
     if let Some(rest) = line.strip_prefix("READY ") {
-        let mut it = rest.split_whitespace().filter_map(|v| v.parse::<u32>().ok());
-        st.size = it.next().zip(it.next());
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let num = |i: usize| fields.get(i).and_then(|v| v.parse::<u32>().ok());
+        st.size = num(0).zip(num(1));
+        st.ready_mono = fields.get(2).and_then(|v| v.parse::<u64>().ok()).map(|ns| ns as f64 / 1e9);
         st.ready_at.get_or_insert_with(Instant::now);
     } else if let Some(msg) = line.strip_prefix("ERROR ") {
         st.error.get_or_insert_with(|| msg.to_string());
@@ -204,6 +249,19 @@ impl ActiveEncoderSession {
     /// the first captured frame; see [`Self::ready_at`].
     pub fn start_capture(output_path: impl AsRef<Path>, options: &CaptureOptions) -> Result<Self> {
         let out_path = output_path.as_ref().to_path_buf();
+        Self::start_into(&out_path, &crate::ffmpeg::CaptureTarget::File(&out_path), options)
+    }
+
+    /// Like [`Self::start_capture`], into a ring of segments in `dir` (see
+    /// `replay`). The cursor is drawn into the frames.
+    pub fn start_ring(dir: &Path, segment_sec: u32, count: u32, options: &CaptureOptions) -> Result<Self> {
+        let options = CaptureOptions { studio_cursor: false, ..options.clone() };
+        let target = crate::ffmpeg::CaptureTarget::Ring { dir, segment_sec, count };
+        Self::start_into(dir, &target, &options)
+    }
+
+    fn start_into(out_path: &Path, target: &crate::ffmpeg::CaptureTarget, options: &CaptureOptions) -> Result<Self> {
+        let out_path = out_path.to_path_buf();
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -222,8 +280,17 @@ impl ActiveEncoderSession {
             .args([
                 "--sources",
                 if options.source == CaptureSource::Window { "window" } else { "monitor" },
-            ])
-            .args(["--cursor", if options.show_cursor { "embedded" } else { "hidden" }]);
+            ]);
+        let cursor_track = (options.show_cursor && options.studio_cursor && matches!(target, crate::ffmpeg::CaptureTarget::File(_)))
+            .then(|| crate::cursor_track::track_path(&out_path));
+        match &cursor_track {
+            Some(track) => {
+                cmd.args(["--cursor", "metadata", "--cursor-track"]).arg(track);
+            }
+            None => {
+                cmd.args(["--cursor", if options.show_cursor { "embedded" } else { "hidden" }]);
+            }
+        }
         if options.repick {
             cmd.arg("--reset");
         }
@@ -232,8 +299,9 @@ impl ActiveEncoderSession {
             options.quality,
             options.fps,
             audio,
+            options.clean_mic,
             options.region,
-            &out_path,
+            target,
         ));
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -264,6 +332,7 @@ impl ActiveEncoderSession {
             fps: options.fps,
             zoom_events: Vec::with_capacity(4096),
             interrupted: None,
+            cursor_track,
         })
     }
 
@@ -515,9 +584,11 @@ impl ActiveEncoderSession {
             fps,
             zoom_events: Vec::new(),
             interrupted: None,
+            cursor_track: None,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_zoom_telemetry(
         &mut self,
         t_sec: f32,
@@ -574,25 +645,23 @@ impl ActiveEncoderSession {
     pub fn write_frame(&mut self, frame: &FrameBuffer) -> Result<()> {
         if let RecordingEngineKind::FfmpegPipe {
             ref mut child,
-            ref mut stdin,
+            stdin: Some(ref mut pipe),
         } = self.kind
         {
-            if let Some(ref mut pipe) = stdin {
-                if pipe.write_all(&frame.data).is_err() {
-                    let _ = child.wait();
-                    let mut fallback = Self::start(
-                        &self.output_path,
-                        self.width,
-                        self.height,
-                        self.fps,
-                        HardwareEncoderBackend::SoftwareX264Fast,
-                    )?;
-                    fallback.write_frame(frame)?;
-                    *self = fallback;
-                    return Ok(());
-                }
-                self.frames_written += 1;
+            if pipe.write_all(&frame.data).is_err() {
+                let _ = child.wait();
+                let mut fallback = Self::start(
+                    &self.output_path,
+                    self.width,
+                    self.height,
+                    self.fps,
+                    HardwareEncoderBackend::SoftwareX264Fast,
+                )?;
+                fallback.write_frame(frame)?;
+                *self = fallback;
+                return Ok(());
             }
+            self.frames_written += 1;
         }
         Ok(())
     }
@@ -601,6 +670,7 @@ impl ActiveEncoderSession {
     /// a few seconds, so call it off the UI thread.
     pub fn finish_capture(mut self) -> FinishedCapture {
         let mut error = None;
+        let mut clock = Vec::new();
         let mut keep_sec = self.interrupted.as_ref().map(|(sec, _)| *sec);
         match self.kind {
             RecordingEngineKind::ZeroCopyGsr {
@@ -634,6 +704,11 @@ impl ActiveEncoderSession {
                 if let Some((sec, _)) = lost {
                     keep_sec = Some(keep_sec.map_or(sec, |k| k.min(sec)));
                 }
+                clock.extend(st.ready_mono.map(|zero| crate::webcam::ClockSpan {
+                    shift: 0.0,
+                    zero,
+                    last: keep_sec.unwrap_or(f64::INFINITY),
+                }));
             }
             RecordingEngineKind::FfmpegPipe {
                 ref mut child,
@@ -643,11 +718,21 @@ impl ActiveEncoderSession {
                 let _ = child.wait();
             }
         }
+        let cursor = self.cursor_track.and_then(|track| {
+            let loaded = crate::cursor_track::CursorTrack::load(&track);
+            let _ = std::fs::remove_file(&track);
+            loaded
+                .map_err(|err| eprintln!("[HyperGSR] cursor track unusable: {err:#}"))
+                .ok()
+        });
         FinishedCapture {
             path: self.output_path,
             zoom_events: self.zoom_events,
             error,
             keep_sec,
+            cursor,
+            cuts: Vec::new(),
+            clock,
         }
     }
 
@@ -761,8 +846,8 @@ pub fn build_smooth_60fps_camera_frames(
                 .map(|n| n.timestamp_sec)
                 .unwrap_or(ev.timestamp_sec + 0.02);
             let end_idx = ((next_t * 60.0).ceil() as usize).min(total_frames.saturating_sub(1));
-            for m_f in idx..=end_idx {
-                rec_manual[m_f] = true;
+            if idx <= end_idx {
+                rec_manual[idx..=end_idx].fill(true);
             }
         }
     }
@@ -837,9 +922,7 @@ pub fn build_smooth_60fps_camera_frames(
         // 3. Glide-and-settle to a new UI region (settle for 16 frames = 260ms after traveling)
         let settle_trigger = traveled_since_last && settle_counter == 16;
 
-        if cooldown_remaining > 0 {
-            cooldown_remaining -= 1;
-        }
+        cooldown_remaining = cooldown_remaining.saturating_sub(1);
 
         if (rec_click[f] || rec_rising_edge || settle_trigger) && cooldown_remaining == 0 && hold_remaining == 0 {
             hold_remaining = 105; // 1.75 seconds hold at 60fps
@@ -974,6 +1057,7 @@ fn sample_trajectory(events: &[RecordedZoomEvent], t_sec: f32) -> (f32, f32, f32
 
 /// Renders a complete, self-contained Studio Demo MP4 showcasing cursor smoothing,
 /// click ripples, and spring-physics automatic zoom-ins.
+#[allow(clippy::too_many_arguments)]
 pub fn export_showcase_recording(
     output_path: impl AsRef<Path>,
     width: usize,
@@ -1083,8 +1167,9 @@ mod tests {
     #[test]
     fn parses_stall_and_loss_reports() {
         let mut st = CaptureStatus::default();
-        apply_helper_line(&mut st, "READY 1920 1080");
+        apply_helper_line(&mut st, "READY 1920 1080 12345678900000");
         assert_eq!(st.size, Some((1920, 1080)));
+        assert_eq!(st.ready_mono, Some(12345.6789));
         apply_helper_line(&mut st, "STALLED 64.900");
         assert_eq!(st.stalled.map(|(_, sec)| sec), Some(64.9));
         apply_helper_line(&mut st, "FLOWING");

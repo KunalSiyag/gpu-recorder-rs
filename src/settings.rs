@@ -38,6 +38,71 @@ pub enum Quality {
     High,
 }
 
+/// Where the webcam bubble goes, if anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Webcam {
+    #[default]
+    Off,
+    Left,
+    Right,
+}
+
+/// Shape of an exported video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Aspect {
+    /// The recording's own shape.
+    #[default]
+    Original,
+    Wide,
+    Vertical,
+    Square,
+}
+
+impl Aspect {
+    /// Width to height, or `None` for the recording's own shape.
+    pub fn ratio(self) -> Option<(usize, usize)> {
+        match self {
+            Aspect::Original => None,
+            Aspect::Wide => Some((16, 9)),
+            Aspect::Vertical => Some((9, 16)),
+            Aspect::Square => Some((1, 1)),
+        }
+    }
+
+    /// Output size for a `src`-sized recording: vertical and square videos
+    /// keep the recording's short side, wide ones its long side. Sizes are
+    /// even and within what hardware encoders accept.
+    pub fn output_size(self, src: (usize, usize)) -> (usize, usize) {
+        let Some((a, b)) = self.ratio() else { return src };
+        let (short, long) = (src.0.min(src.1), src.0.max(src.1));
+        let (w, h) = if a > b { (long, long * b / a) } else { (short, short * b / a) };
+        let fit = (4096.0 / w.max(h) as f64).min(1.0);
+        let even = |v: usize| (((v as f64 * fit) / 2.0).round() as usize * 2).max(16);
+        (even(w), even(h))
+    }
+}
+
+/// Container and codec of an exported video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ExportFormat {
+    #[default]
+    Mp4,
+    /// VP9 and Opus, for the web.
+    WebM,
+    /// Silent, 15 frames per second, at most 960 pixels wide.
+    Gif,
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Mp4 => "mp4",
+            ExportFormat::WebM => "webm",
+            ExportFormat::Gif => "gif",
+        }
+    }
+}
+
 /// Normalized rectangle (0..1) of the captured monitor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Region {
@@ -127,10 +192,27 @@ pub struct RecorderSettings {
     pub fps: u32,
     pub quality: Quality,
     pub show_cursor: bool,
+    /// Size of the studio-drawn cursor (1.0 is the desktop's own size).
+    pub cursor_scale: f32,
+    /// Show a ripple where you clicked.
+    pub click_ripples: bool,
     pub auto_zoom: bool,
     pub background: BackgroundSettings,
     /// Where recordings are saved; `None` means `~/Videos`.
     pub save_dir: Option<PathBuf>,
+    /// Seconds counted down once the screen share is running, left out of
+    /// the video; 0 starts at once.
+    pub countdown_sec: u32,
+    /// Filter background noise out of the microphone.
+    pub clean_mic: bool,
+    /// Record the webcam and show it as a bubble in a bottom corner.
+    pub webcam: Webcam,
+    /// Bubble diameter as a fraction of the video's shorter side.
+    pub webcam_size: f32,
+    /// Hide the island while recording, so it is not in the video.
+    pub hide_while_recording: bool,
+    /// Seconds an instant-replay clip keeps; 0 turns instant replay off.
+    pub replay_sec: u32,
 }
 
 impl Default for RecorderSettings {
@@ -142,9 +224,17 @@ impl Default for RecorderSettings {
             fps: 60,
             quality: Quality::High,
             show_cursor: true,
+            cursor_scale: 1.0,
+            click_ripples: true,
             auto_zoom: true,
             background: BackgroundSettings::default(),
             save_dir: None,
+            countdown_sec: 3,
+            clean_mic: true,
+            webcam: Webcam::Off,
+            webcam_size: 0.24,
+            hide_while_recording: false,
+            replay_sec: 0,
         }
     }
 }
@@ -178,6 +268,10 @@ impl RecorderSettings {
 
     fn sanitized(mut self) -> Self {
         self.fps = if self.fps <= 30 { 30 } else { 60 };
+        self.countdown_sec = self.countdown_sec.min(10);
+        self.replay_sec = self.replay_sec.min(600);
+        self.webcam_size = if self.webcam_size.is_finite() { self.webcam_size.clamp(0.1, 0.4) } else { 0.24 };
+        self.cursor_scale = if self.cursor_scale.is_finite() { self.cursor_scale.clamp(1.0, 2.0) } else { 1.0 };
         self.region = self.region.and_then(Region::normalized);
         // A folder that was removed or unmounted falls back to ~/Videos.
         self.save_dir = self.save_dir.filter(|d| d.is_absolute() && d.is_dir());
@@ -226,6 +320,18 @@ mod tests {
         let r = Region { x: 0.25, y: 0.5, w: 0.5, h: 0.25 };
         assert_eq!(r.map_point(0.5, 0.625), (0.5, 0.5));
         assert_eq!(r.map_point(0.0, 1.0), (0.0, 1.0));
+    }
+
+    #[test]
+    fn export_shapes_keep_the_recordings_resolution() {
+        assert_eq!(Aspect::Original.output_size((1366, 768)), (1366, 768));
+        assert_eq!(Aspect::Vertical.output_size((1920, 1080)), (1080, 1920));
+        assert_eq!(Aspect::Square.output_size((1920, 1080)), (1080, 1080));
+        assert_eq!(Aspect::Wide.output_size((1920, 1080)), (1920, 1080));
+        assert_eq!(Aspect::Wide.output_size((800, 1200)), (1200, 676));
+        // 4K-wide screens stay within the H.264 hardware limit.
+        let (w, h) = Aspect::Vertical.output_size((5120, 2880));
+        assert!(w <= 4096 && h <= 4096 && w % 2 == 0 && h % 2 == 0, "{w}x{h}");
     }
 
     #[test]

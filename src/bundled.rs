@@ -70,12 +70,24 @@ const SYMBOLIC_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/hgsr-ctrl-click-symbolic.svg"),
     ),
     (
+        "hgsr-cursor-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-cursor-symbolic.svg"),
+    ),
+    (
         "hgsr-double-click-symbolic.svg",
         include_bytes!("../assets/icons/hgsr-double-click-symbolic.svg"),
     ),
     (
+        "hgsr-export-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-export-symbolic.svg"),
+    ),
+    (
         "hgsr-folder-symbolic.svg",
         include_bytes!("../assets/icons/hgsr-folder-symbolic.svg"),
+    ),
+    (
+        "hgsr-hide-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-hide-symbolic.svg"),
     ),
     (
         "hgsr-keyboard-symbolic.svg",
@@ -94,6 +106,10 @@ const SYMBOLIC_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/hgsr-mouse-symbolic.svg"),
     ),
     (
+        "hgsr-pause-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-pause-symbolic.svg"),
+    ),
+    (
         "hgsr-play-symbolic.svg",
         include_bytes!("../assets/icons/hgsr-play-symbolic.svg"),
     ),
@@ -104,6 +120,10 @@ const SYMBOLIC_ICONS: &[(&str, &[u8])] = &[
     (
         "hgsr-record-symbolic.svg",
         include_bytes!("../assets/icons/hgsr-record-symbolic.svg"),
+    ),
+    (
+        "hgsr-replay-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-replay-symbolic.svg"),
     ),
     (
         "hgsr-screen-symbolic.svg",
@@ -122,8 +142,20 @@ const SYMBOLIC_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/hgsr-sun-symbolic.svg"),
     ),
     (
+        "hgsr-timer-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-timer-symbolic.svg"),
+    ),
+    (
         "hgsr-toggle-symbolic.svg",
         include_bytes!("../assets/icons/hgsr-toggle-symbolic.svg"),
+    ),
+    (
+        "hgsr-trim-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-trim-symbolic.svg"),
+    ),
+    (
+        "hgsr-webcam-symbolic.svg",
+        include_bytes!("../assets/icons/hgsr-webcam-symbolic.svg"),
     ),
     (
         "hgsr-wide-symbolic.svg",

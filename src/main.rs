@@ -3,23 +3,30 @@ pub mod bundled;
 pub mod capture;
 pub mod compositor;
 pub mod cursor;
+pub mod cursor_track;
 pub mod decompiled_gsr;
 pub mod encoder;
 pub mod ffmpeg;
+pub mod editor;
 pub mod gui;
 pub mod island_position;
+pub mod project;
 pub mod region_select;
+pub mod replay;
 pub mod settings;
 pub mod shaders;
 pub mod shortcuts;
 pub mod state;
 pub mod studio_panel;
 pub mod studio_render;
+pub mod symbolic_icon;
 pub mod web_ui;
+pub mod webcam;
 pub mod x11_above;
 pub mod zoom_engine;
 
 use crate::state::{SharedStudioState, StudioState};
+use anyhow::Context;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -76,8 +83,21 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     // Bound to a desktop shortcut: start or stop the running recorder.
-    if args.iter().any(|a| a == "--toggle-recording") {
-        return shortcuts::toggle_running_recorder();
+    if let Some(flag) = args.iter().find(|a| *a == "--toggle-recording" || *a == "--pause-recording") {
+        return shortcuts::activate_running_recorder(flag);
+    }
+
+    // --edit <video>: open the editor in the running island, or start one
+    // that opens it.
+    if let Some(idx) = args.iter().position(|a| a == "--edit") {
+        let file = args.get(idx + 1).context("usage: --edit <video>")?;
+        let file = std::fs::canonicalize(file).with_context(|| format!("cannot open {file}"))?;
+        if std::env::var("HYPERGSR_LAYER_SHELL").as_deref() != Ok("1")
+            && shortcuts::activate_in_running("edit", Some(glib::Variant::from(file.display().to_string())))?
+        {
+            return Ok(());
+        }
+        std::env::set_var("HYPERGSR_EDIT", &file);
     }
 
     // Ensure GTK4 initializes on native Wayland with libgtk4-layer-shell preloaded
@@ -87,6 +107,7 @@ fn main() -> anyhow::Result<()> {
         a == "--report"
             || a == "--export-demo"
             || a == "--record-seconds"
+            || a == "--replay"
             || a == "--render-capture"
             || a == "--web"
             || a == "--web-only"
@@ -126,6 +147,14 @@ fn main() -> anyhow::Result<()> {
             .get(idx + 1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(3.0);
+        // --pause <at>:<seconds> pauses once, for testing.
+        let pause: Option<(f32, f32)> = args
+            .iter()
+            .position(|a| a == "--pause")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.split_once(':'))
+            .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
+        let mut paused_since: Option<std::time::Instant> = None;
         print_banner(&state);
         let out_path = state.lock().start_recording()?;
         println!(
@@ -147,7 +176,17 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("⚠ Screen sharing was interrupted ({reason}); saving what was recorded");
                 break;
             }
-            let elapsed = g.recording_start.map(|t| t.elapsed().as_secs_f32());
+            // Recorded time, after the countdown and without pauses.
+            let elapsed = g.recording_start.map(|_| g.recording_elapsed_sec());
+            if let (Some(e), Some((at, len))) = (elapsed, pause) {
+                if !g.is_paused_by_user() && e >= at && paused_since.is_none() {
+                    g.toggle_pause();
+                    paused_since = Some(std::time::Instant::now());
+                }
+                if paused_since.is_some_and(|t| t.elapsed().as_secs_f32() >= len) && g.is_paused_by_user() {
+                    g.toggle_pause();
+                }
+            }
             drop(g);
             if elapsed.is_some_and(|e| e >= secs) {
                 break;
@@ -163,17 +202,91 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // --replay <keep> <run>: run instant replay for <run> seconds, then save
+    // a clip of the last <keep> seconds.
+    if let Some(idx) = args.iter().position(|a| a == "--replay") {
+        let num = |i: usize| args.get(idx + i).and_then(|v| v.parse::<u32>().ok());
+        let (Some(keep), Some(run)) = (num(1), num(2)) else {
+            anyhow::bail!("usage: --replay <keep seconds> <run seconds>");
+        };
+        print_banner(&state);
+        state.lock().settings.replay_sec = keep;
+        state.lock().start_replay()?;
+        let started = std::time::Instant::now();
+        while state.lock().replay_buffered_sec().is_none() {
+            if let Some(reason) = state.lock().poll_replay_failure() {
+                anyhow::bail!("instant replay stopped: {reason}");
+            }
+            if started.elapsed().as_secs() > 120 {
+                anyhow::bail!("Screen capture did not start within two minutes");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(run.into()));
+        if let Some(reason) = state.lock().poll_replay_failure() {
+            anyhow::bail!("instant replay stopped: {reason}");
+        }
+        let clip = state.lock().replay_clip()?;
+        let saved = clip.save();
+        let replay = state.lock().take_replay();
+        if let Some(replay) = replay {
+            replay.stop();
+        }
+        println!("✔ Saved replay clip -> {}", saved?.display());
+        return Ok(());
+    }
+
     // Re-render a raw capture with saved cursor telemetry and the current
-    // background settings: --render-capture <capture.mp4> <telemetry.json> <out.mp4>
+    // background settings, optionally drawing a recorded cursor track:
+    // --render-capture <capture.mp4> <telemetry.json> <out.mp4> [<capture.cursor>]
     if let Some(idx) = args.iter().position(|a| a == "--render-capture") {
         let (Some(capture), Some(telemetry), Some(output)) =
             (args.get(idx + 1), args.get(idx + 2), args.get(idx + 3))
         else {
-            anyhow::bail!("usage: --render-capture <capture.mp4> <telemetry.json> <out.mp4>");
+            anyhow::bail!(
+                "usage: --render-capture <capture.mp4> <telemetry.json> <out> [<capture.cursor>] \
+                 [--aspect wide|vertical|square] [--format mp4|webm|gif] [--cut <from>:<to>]..."
+            );
         };
+        let cursor = args
+            .get(idx + 4)
+            .filter(|p| !p.starts_with("--"))
+            .map(|p| cursor_track::CursorTrack::load(std::path::Path::new(p)))
+            .transpose()?;
+        let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+        let aspect = match option("--aspect").map(String::as_str) {
+            Some("wide") => settings::Aspect::Wide,
+            Some("vertical") => settings::Aspect::Vertical,
+            Some("square") => settings::Aspect::Square,
+            _ => settings::Aspect::Original,
+        };
+        let format = match option("--format").map(String::as_str) {
+            Some("webm") => settings::ExportFormat::WebM,
+            Some("gif") => settings::ExportFormat::Gif,
+            _ => settings::ExportFormat::Mp4,
+        };
+        let cuts: Vec<(f64, f64)> = args
+            .windows(2)
+            .filter(|w| w[0] == "--cut")
+            .filter_map(|w| {
+                let (a, b) = w[1].split_once(':')?;
+                Some((a.parse().ok()?, if b.is_empty() { f64::INFINITY } else { b.parse().ok()? }))
+            })
+            .collect();
         let events: Vec<encoder::RecordedZoomEvent> =
             serde_json::from_str(&std::fs::read_to_string(telemetry)?)?;
         let settings = state.lock().settings.clone();
+        // --webcam <video>@<sec>: a camera clip whose <sec> mark lines up
+        // with the capture's first frame.
+        let webcam = option("--webcam").and_then(|v| v.rsplit_once('@')).and_then(|(path, offset)| {
+            Some(webcam::WebcamClip {
+                path: PathBuf::from(path),
+                start: 0.0,
+                clock: vec![webcam::ClockSpan { shift: 0.0, zero: offset.parse().ok()?, last: f64::INFINITY }],
+                corner: if settings.webcam == settings::Webcam::Left { settings::Webcam::Left } else { settings::Webcam::Right },
+                size: settings.webcam_size,
+            })
+        });
         let job = studio_render::RenderJob {
             capture: PathBuf::from(capture),
             output: PathBuf::from(output),
@@ -183,6 +296,13 @@ fn main() -> anyhow::Result<()> {
             background: settings.background.clone(),
             quality: settings.quality,
             fps: settings.fps,
+            cursor,
+            cursor_scale: settings.cursor_scale,
+            click_ripples: settings.click_ripples,
+            cuts,
+            aspect,
+            format,
+            webcam,
         };
         let started = std::time::Instant::now();
         let saved = studio_render::render(&job, &std::sync::atomic::AtomicU32::new(0))?;
@@ -275,9 +395,11 @@ mod tests {
         let mut engine = ZoomEngine::new();
         let mut tracker = CursorTracker::new();
         let cur_cfg = CursorConfig::default();
-        let mut zoom_cfg = ZoomConfig::default();
-        zoom_cfg.mode = AutoZoomMode::ClickToZoom;
-        zoom_cfg.target_zoom = 2.25;
+        let zoom_cfg = ZoomConfig {
+            mode: AutoZoomMode::ClickToZoom,
+            target_zoom: 2.25,
+            ..Default::default()
+        };
 
         let (sample, clicked) = tracker.update(100, 0.25, 0.30, true, false, &cur_cfg);
         assert!(clicked);
@@ -376,20 +498,22 @@ mod tests {
         let mut engine = ZoomEngine::new();
         let mut tracker = CursorTracker::new();
         let cur_cfg = CursorConfig::default();
-        let mut zoom_cfg = ZoomConfig::default();
         // Configure user-registered custom combo: Ctrl + Right Click in ToggleLock mode
-        zoom_cfg.combo_binding = ZoomComboBinding::Custom {
-            ctrl: true,
-            alt: false,
-            shift: false,
-            super_key: false,
-            mouse_button: 3,
-            keycode: 0,
-            shake: false,
-            label: "⌃ Ctrl + Right-Click".to_string(),
+        let zoom_cfg = ZoomConfig {
+            combo_binding: ZoomComboBinding::Custom {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                super_key: false,
+                mouse_button: 3,
+                keycode: 0,
+                shake: false,
+                label: "⌃ Ctrl + Right-Click".to_string(),
+            },
+            combo_action: ComboActionMode::ToggleLock,
+            target_zoom: 2.40,
+            ..Default::default()
         };
-        zoom_cfg.combo_action = ComboActionMode::ToggleLock;
-        zoom_cfg.target_zoom = 2.40;
 
         // 1. Trigger the custom combo at t = 100ms
         let (s1, c1) = tracker.update_with_input(
