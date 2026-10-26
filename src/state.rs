@@ -476,9 +476,7 @@ impl StudioState {
             parts,
             session,
             capture,
-            auto_zoom: self.auto_apply_zoom_on_stop
-                && settings.auto_zoom
-                && settings.source != CaptureSource::Window,
+            auto_zoom: self.auto_apply_zoom_on_stop && settings.auto_zoom,
             settings,
         })
     }
@@ -569,16 +567,24 @@ impl StopJob {
         save_telemetry(&capture, &done.zoom_events);
 
         let output = final_path(&capture);
+        let cursor = done.cursor.filter(|c| c.is_useful());
+        // Live telemetry is screen-wide, so a window is only zoomed by its
+        // own cursor track.
+        let auto_zoom =
+            self.auto_zoom && (self.settings.source != CaptureSource::Window || cursor.is_some());
         let job = RenderJob {
             capture: capture.clone(),
             output: output.clone(),
             events: done.zoom_events,
-            auto_zoom: self.auto_zoom,
+            auto_zoom,
             region: self.settings.active_region(),
             background: self.settings.background.clone(),
             quality: self.settings.quality,
             fps: self.settings.fps,
-            cursor: done.cursor.filter(|c| c.is_useful()),
+            // Screen-wide click positions mean nothing inside a window.
+            click_ripples: self.settings.click_ripples
+                && (self.settings.source != CaptureSource::Window || cursor.is_some()),
+            cursor,
             cursor_scale: self.settings.cursor_scale,
         };
         let result = studio_render::render(&job, progress).or_else(|err| {

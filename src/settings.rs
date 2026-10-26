@@ -129,6 +129,8 @@ pub struct RecorderSettings {
     pub show_cursor: bool,
     /// Size of the studio-drawn cursor (1.0 is the desktop's own size).
     pub cursor_scale: f32,
+    /// Show a ripple where you clicked.
+    pub click_ripples: bool,
     pub auto_zoom: bool,
     pub background: BackgroundSettings,
     /// Where recordings are saved; `None` means `~/Videos`.
@@ -145,6 +147,7 @@ impl Default for RecorderSettings {
             quality: Quality::High,
             show_cursor: true,
             cursor_scale: 1.0,
+            click_ripples: true,
             auto_zoom: true,
             background: BackgroundSettings::default(),
             save_dir: None,

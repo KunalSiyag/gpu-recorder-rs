@@ -35,6 +35,8 @@ pub struct RenderJob {
     /// drawn on a smoothed path, `cursor_scale` times its size.
     pub cursor: Option<CursorTrack>,
     pub cursor_scale: f32,
+    /// Show a ripple where each recorded click happened.
+    pub click_ripples: bool,
 }
 
 /// Cursor at each output frame, ready to draw.
@@ -45,17 +47,23 @@ struct CursorFrames {
     scale: f32,
 }
 
+/// Where the capture's top-left corner sits in the stream the cursor track
+/// is measured in: the capture is cropped the way `Region::crop_filter`
+/// rounds it.
+fn cursor_crop(job: &RenderJob, track: &CursorTrack, capture: (usize, usize)) -> (f32, f32) {
+    job.region.map_or((0.0, 0.0), |r| {
+        let (sw, sh) = track.stream_size.map_or(
+            (capture.0 as f32 / r.w, capture.1 as f32 / r.h),
+            |(w, h)| (w as f32, h as f32),
+        );
+        ((sw * r.x).trunc(), (sh * r.y).trunc())
+    })
+}
+
 impl CursorFrames {
     fn new(job: &RenderJob, info_w: usize, info_h: usize, frames: usize) -> Option<Self> {
         let track = job.cursor.as_ref()?;
-        // The capture is cropped from the stream the way `Region::crop_filter`
-        // rounds it.
-        let crop = job.region.map_or((0.0, 0.0), |r| {
-            let (sw, sh) = track
-                .stream_size
-                .map_or((info_w as f32 / r.w, info_h as f32 / r.h), |(w, h)| (w as f32, h as f32));
-            ((sw * r.x).trunc(), (sh * r.y).trunc())
-        });
+        let crop = cursor_crop(job, track, (info_w, info_h));
         Some(Self {
             shapes: track.shapes.iter().map(PreparedShape::new).collect(),
             path: track.frames(job.fps, frames, crop),
@@ -66,22 +74,65 @@ impl CursorFrames {
     fn draw(&self, index: u64, frame: &mut [u16], compositor: &Compositor, cam: Camera) {
         let Some(&Some((x, y, shape))) = self.path.get(index as usize) else { return };
         let Some(shape) = self.shapes.get(shape - 1) else { return };
-        let rect = compositor.luma.rect;
-        let place = Placement { rect: (rect.x, rect.y, rect.w, rect.h), view: compositor.view(cam) };
+        let place = compositor.placement(cam);
         cursor_track::draw_nv12(as_bytes_mut(frame), compositor.w, compositor.h, place, shape, (x, y), self.scale);
     }
+}
+
+/// Video time and capture-pixel position of each click to show a ripple
+/// for. With a cursor track, the ripple sits on the drawn cursor.
+fn click_points(job: &RenderJob, capture: (usize, usize), cursor: Option<&CursorFrames>) -> Vec<(f64, f32, f32)> {
+    if !job.click_ripples {
+        return Vec::new();
+    }
+    job.events
+        .iter()
+        .filter(|e| e.clicked && !e.off_capture)
+        .filter_map(|e| {
+            let t = f64::from(e.timestamp_sec);
+            let (x, y) = match cursor {
+                Some(c) => {
+                    let (x, y, _) = (*c.path.get((t * job.fps as f64).round() as usize)?)?;
+                    (x, y)
+                }
+                None => {
+                    let (x, y) = job.region.map_or((e.cursor_x, e.cursor_y), |r| r.map_point(e.cursor_x, e.cursor_y));
+                    (x * capture.0 as f32, y * capture.1 as f32)
+                }
+            };
+            Some((t, x, y))
+        })
+        .collect()
 }
 
 /// Camera at one output frame: center (normalized) and zoom factor.
 type Camera = (f32, f32, f32);
 
-fn camera_track(job: &RenderJob, duration_sec: f64) -> Option<Vec<Camera>> {
+/// The camera path for a capture of `capture` pixels. With a cursor track,
+/// the zoom follows the track, which is measured on the recorded stream
+/// itself (a window, or the right display); clicks and manual zoom still
+/// come from the live telemetry.
+fn camera_track(job: &RenderJob, duration_sec: f64, capture: (usize, usize)) -> Option<Vec<Camera>> {
     if !job.auto_zoom || job.events.is_empty() {
         return None;
     }
+    let on_stream = |e: &RecordedZoomEvent| -> RecordedZoomEvent {
+        let Some(track) = &job.cursor else { return *e };
+        let crop = cursor_crop(job, track, capture);
+        match track.position_at(f64::from(e.timestamp_sec)) {
+            Some((x, y)) => {
+                let x = ((x - crop.0) / capture.0 as f32).clamp(0.0, 1.0);
+                let y = ((y - crop.1) / capture.1 as f32).clamp(0.0, 1.0);
+                RecordedZoomEvent { cursor_x: x, cursor_y: y, center_x: x, center_y: y, off_capture: false, ..*e }
+            }
+            // The cursor is not over the recording.
+            None => RecordedZoomEvent { off_capture: true, ..*e },
+        }
+    };
     let events: Vec<RecordedZoomEvent> = job
         .events
         .iter()
+        .map(on_stream)
         .map(|e| {
             if e.off_capture {
                 // The cursor is on another display: hold the wide view.
@@ -93,10 +144,10 @@ fn camera_track(job: &RenderJob, duration_sec: f64) -> Option<Vec<Camera>> {
                     zoom: 1.0,
                     clicked: false,
                     manual_lock: false,
-                    ..*e
+                    ..e
                 };
             }
-            let Some(region) = job.region else { return *e };
+            let Some(region) = job.region.filter(|_| job.cursor.is_none()) else { return e };
             let (cx, cy) = region.map_point(e.cursor_x, e.cursor_y);
             let (zx, zy) = region.map_point(e.center_x, e.center_y);
             RecordedZoomEvent {
@@ -104,7 +155,7 @@ fn camera_track(job: &RenderJob, duration_sec: f64) -> Option<Vec<Camera>> {
                 cursor_y: cy,
                 center_x: zx,
                 center_y: zy,
-                ..*e
+                ..e
             }
         })
         .collect();
@@ -123,8 +174,14 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
         libc::setpriority(libc::PRIO_PROCESS, 0, 10);
     }
     let info = ffmpeg::probe_video(&job.capture)?;
-    let track = camera_track(job, info.duration_sec);
-    if track.is_none() && !job.background.is_enabled() && job.cursor.is_none() {
+    let track = camera_track(job, info.duration_sec, (info.width, info.height));
+    let video_sec = (info.duration_sec - info.video_start_sec).max(0.0);
+    let expected = ((video_sec * job.fps as f64).round() as u64).max(1);
+    // Container durations can exceed the video by a few frames (audio tail).
+    let slack = (job.fps as u64 / 2).max(3);
+    let cursor = CursorFrames::new(job, info.width, info.height, expected as usize + slack as usize * 4);
+    let clicks = click_points(job, (info.width, info.height), cursor.as_ref());
+    if track.is_none() && !job.background.is_enabled() && cursor.is_none() && clicks.is_empty() {
         ffmpeg::remux_to_mp4(&job.capture, &job.output)?;
         progress.store(1000, Ordering::Relaxed);
         return Ok(job.output.clone());
@@ -153,13 +210,13 @@ pub fn render(job: &RenderJob, progress: &AtomicU32) -> Result<PathBuf> {
         .build()
         .context("cannot start render threads")?;
     let encoder = ffmpeg::capabilities().encoder.clone();
-    let video_sec = (info.duration_sec - info.video_start_sec).max(0.0);
-    let expected = ((video_sec * job.fps as f64).round() as u64).max(1);
-    // Container durations can exceed the video by a few frames (audio tail).
-    let slack = (job.fps as u64 / 2).max(3);
-    let cursor = CursorFrames::new(job, w, h, expected as usize + slack as usize * 4);
     let frames = pool.install(|| {
-        let effects = Effects { compositor: &compositor, camera: track.as_deref(), cursor: cursor.as_ref() };
+        let effects = Effects {
+            compositor: &compositor,
+            camera: track.as_deref(),
+            cursor: cursor.as_ref(),
+            clicks: &clicks,
+        };
         run_pipeline(job, &encoder, effects, &tmp, expected, info.video_start_sec, progress)
     });
 
@@ -197,6 +254,8 @@ struct Effects<'a> {
     compositor: &'a Compositor,
     camera: Option<&'a [Camera]>,
     cursor: Option<&'a CursorFrames>,
+    /// From [`click_points`], in time order.
+    clicks: &'a [(f64, f32, f32)],
 }
 
 fn run_pipeline(
@@ -289,6 +348,15 @@ fn run_pipeline(
                 .map(|tr| tr[((t * 60.0).round() as usize).min(tr.len() - 1)])
                 .unwrap_or((0.5, 0.5, 1.0));
             compositor.compose(&input, &mut output, cam);
+            let started = effects.clicks.partition_point(|c| c.0 <= t);
+            for &(tc, x, y) in effects.clicks[..started].iter().rev() {
+                if t - tc >= cursor_track::RIPPLE_SEC {
+                    break;
+                }
+                let place = compositor.placement(cam);
+                let progress = ((t - tc) / cursor_track::RIPPLE_SEC) as f32;
+                cursor_track::draw_ripple_nv12(as_bytes_mut(&mut output), w, h, place, (x, y), progress);
+            }
             if let Some(cursor) = effects.cursor {
                 cursor.draw(index, &mut output, compositor, cam);
             }
@@ -589,6 +657,12 @@ impl Compositor {
         (x0, y0, view_w, view_h)
     }
 
+    /// Where capture pixels land in the output for the camera.
+    fn placement(&self, cam: Camera) -> Placement {
+        let r = self.luma.rect;
+        Placement { rect: (r.x, r.y, r.w, r.h), view: self.view(cam) }
+    }
+
     /// Writes one NV12 output frame for the camera `(center_x, center_y, zoom)`.
     pub fn compose(&self, src: &[u16], dst: &mut [u16], cam: Camera) {
         let (w, h) = (self.w, self.h);
@@ -700,6 +774,7 @@ mod tests {
             fps: 60,
             cursor: None,
             cursor_scale: 1.0,
+            click_ripples: true,
         }
     }
 
@@ -721,8 +796,32 @@ mod tests {
 
     #[test]
     fn clicks_on_the_recorded_display_zoom_but_other_displays_do_not() {
-        assert!(camera_track(&job_with(clicking(false)), 8.0).is_some());
-        assert!(camera_track(&job_with(clicking(true)), 8.0).is_none());
+        assert!(camera_track(&job_with(clicking(false)), 8.0, (1920, 1080)).is_some());
+        assert!(camera_track(&job_with(clicking(true)), 8.0, (1920, 1080)).is_none());
+    }
+
+    fn track_at(x: f32, y: f32, visible: bool) -> CursorTrack {
+        let shape = crate::cursor_track::Shape { w: 1, h: 1, hot_x: 0.0, hot_y: 0.0, rgba: vec![0, 0, 0, 255] };
+        CursorTrack {
+            stream_size: Some((1920, 1080)),
+            shapes: vec![shape],
+            samples: vec![crate::cursor_track::Sample { t: 0.0, x, y, shape: usize::from(visible) }],
+        }
+    }
+
+    #[test]
+    fn a_cursor_track_steers_the_zoom_instead_of_screen_telemetry() {
+        // Screen telemetry says (0.3, 0.3); the recorded stream's own cursor
+        // is at (0.75, 0.75).
+        let mut job = job_with(clicking(false));
+        job.cursor = Some(track_at(1440.0, 810.0, true));
+        let track = camera_track(&job, 8.0, (1920, 1080)).expect("zooms");
+        let (cx, cy, z) = track[3 * 60];
+        assert!(z > 1.3 && cx > 0.6 && cy > 0.6, "camera {cx} {cy} {z}");
+
+        // A cursor that is never over the recording leaves it wide.
+        job.cursor = Some(track_at(1440.0, 810.0, false));
+        assert!(camera_track(&job, 8.0, (1920, 1080)).is_none());
     }
 
     #[test]

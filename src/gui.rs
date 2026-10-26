@@ -1302,9 +1302,19 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
     vis_card.append(&radar_area);
 
-    let footer_lbl = Label::new(Some("Ready · recordings go to ~/Videos"));
+    let footer_lbl = Label::new(Some(&format!(
+        "Ready · recordings go to {}",
+        crate::studio_panel::display_dir(&state.lock().settings.recordings_dir())
+    )));
     footer_lbl.set_hexpand(true);
     footer_lbl.set_halign(Align::Start);
+    // Long folder names and messages wrap instead of widening the island.
+    footer_lbl.set_wrap(true);
+    footer_lbl.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    footer_lbl.set_lines(2);
+    footer_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    footer_lbl.set_max_width_chars(34);
+    footer_lbl.set_xalign(0.0);
 
     let vis_btn_row = GtkBox::new(Orientation::Horizontal, 6);
     let test_zoom_btn = icon_button("lock", "Lock zoom");

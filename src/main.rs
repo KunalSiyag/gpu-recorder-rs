@@ -191,6 +191,7 @@ fn main() -> anyhow::Result<()> {
             fps: settings.fps,
             cursor,
             cursor_scale: settings.cursor_scale,
+            click_ripples: settings.click_ripples,
         };
         let started = std::time::Instant::now();
         let saved = studio_render::render(&job, &std::sync::atomic::AtomicU32::new(0))?;
