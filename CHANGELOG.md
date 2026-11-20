@@ -22,11 +22,14 @@ All notable changes to HyperGSR. Versions follow [Semantic Versioning](https://s
 
 - Recordings no longer end after a few seconds on a still screen: video time follows the wall clock.
 - A broken screen share pauses the recording instead of ending it; **Resume** continues in the same video.
+- The area picker no longer shows a black screen in the Flatpak on COSMIC. Sandboxed apps get no layer-shell there, and the compositor backs fullscreen windows with an opaque fill, so the picker draws a still from the Screenshot portal behind the selection.
+- The island can be dragged by any empty part of its top bar. Without layer-shell it uses GTK's own window handle; with it, a drag starts only after the pointer moves 6 px, so button clicks stay clicks.
 
 ### Changed
 
 - The capture helper speaks protocol 6 (`READY` carries the monotonic time of video time zero).
 - CI runs `cargo clippy --all-targets -- -D warnings`.
+- Selected segments, tabs and action chips are neutral graphite (white in the light theme) instead of indigo; red and green keep their meaning, and amber is the one highlight.
 
 ## 1.2.0 (2026-10-17)
 

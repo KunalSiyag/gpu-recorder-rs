@@ -79,6 +79,10 @@ pub fn launch_gtk_ui(state: SharedStudioState, _web_port: u16) {
     let app = Application::builder()
         .application_id(crate::shortcuts::APP_ID)
         .build();
+    // Tests run a second copy next to the user's own instance.
+    if std::env::var("HYPERGSR_NON_UNIQUE").as_deref() == Ok("1") {
+        app.set_flags(gio::ApplicationFlags::NON_UNIQUE);
+    }
 
     app.connect_activate(move |app| {
         // Launching HyperGSR again shows the island that is already open.
@@ -245,49 +249,28 @@ fn island_size(window: &ApplicationWindow) -> (i32, i32) {
     (window.width().max(1), window.height().max(1))
 }
 
-/// Lets the user drag the island by `handle`. Layer-shell surfaces cannot be
-/// moved by the compositor, so the drag rewrites the surface margins instead;
-/// other shells get a regular compositor move. Returns a callback that pulls
-/// the island back on screen after it changes size.
+/// Lets the user drag the island by any empty part of `bar` (`grip` shows a
+/// grab cursor). Layer-shell surfaces cannot be moved by the compositor, so
+/// the drag rewrites the surface margins instead; without layer-shell
+/// (Flatpak on COSMIC, GNOME) `bar` sits in a `WindowHandle` and the
+/// compositor moves the window. Returns a callback that pulls the island back
+/// on screen after it changes size.
 fn install_island_drag(
     window: &ApplicationWindow,
-    handle: &GtkBox,
+    bar: &GtkBox,
+    grip: &GtkBox,
     layer: Option<LayerShell>,
 ) -> Rc<dyn Fn()> {
-    handle.set_cursor_from_name(Some("grab"));
-    handle.set_tooltip_text(Some("Drag to move · Double-click to re-center"));
-    let drag = GestureDrag::new();
-    drag.set_button(gdk4::BUTTON_PRIMARY);
-
+    grip.set_cursor_from_name(Some("grab"));
     let Some(layer) = layer else {
-        let win = window.clone();
-        let handle_ref = handle.clone();
-        drag.connect_drag_begin(move |gesture, x, y| {
-            let Some(toplevel) = win
-                .surface()
-                .and_then(|s| s.dynamic_cast::<gdk4::Toplevel>().ok())
-            else {
-                return;
-            };
-            let Some(device) = gesture.device() else {
-                return;
-            };
-            let point = handle_ref
-                .compute_point(&win, &gtk4::graphene::Point::new(x as f32, y as f32))
-                .unwrap_or_else(|| gtk4::graphene::Point::new(x as f32, y as f32));
-            let (sx, sy) = win.surface_transform();
-            toplevel.begin_move(
-                &device,
-                gesture.current_button() as i32,
-                point.x() as f64 + sx,
-                point.y() as f64 + sy,
-                gesture.current_event_time(),
-            );
-            gesture.reset();
-        });
-        handle.add_controller(drag);
+        grip.set_tooltip_text(Some("Drag to move"));
         return Rc::new(|| {});
     };
+    grip.set_tooltip_text(Some("Drag to move · Double-click to re-center"));
+    let drag = GestureDrag::new();
+    drag.set_button(gdk4::BUTTON_PRIMARY);
+    // Set once the pointer has moved far enough to be a drag, not a click.
+    let dragging = Rc::new(Cell::new(false));
 
     let pos: Rc<Cell<Option<IslandPos>>> = Rc::new(Cell::new(island_position::load()));
     layer.place(pos.get());
@@ -335,28 +318,35 @@ fn install_island_drag(
     }
 
     {
-        let win = window.clone();
-        let pos = pos.clone();
-        let applied = applied.clone();
-        let requested = requested.clone();
-        let handle_ref = handle.clone();
-        drag.connect_drag_begin(move |_, _, _| {
-            let current = pos.get().unwrap_or_else(|| {
-                let (width, _) = island_size(&win);
-                let monitor_width = monitor_size(&win).map_or(width, |m| m.0);
-                island_position::centered(width, monitor_width)
-            });
-            pos.set(Some(current));
-            applied.set(current);
-            requested.set(current);
-            layer.place(Some(current));
-            handle_ref.set_cursor_from_name(Some("grabbing"));
-        });
+        let dragging = dragging.clone();
+        drag.connect_drag_begin(move |_, _, _| dragging.set(false));
     }
     {
         let win = window.clone();
         let pos = pos.clone();
-        drag.connect_drag_update(move |_, dx, dy| {
+        let grip = grip.clone();
+        let dragging = dragging.clone();
+        drag.connect_drag_update(move |gesture, dx, dy| {
+            if !dragging.get() {
+                // Same threshold as GTK's own window handles; below it a
+                // press on a button stays a click.
+                if dx.hypot(dy) < 6.0 {
+                    return;
+                }
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                dragging.set(true);
+                let current = pos.get().unwrap_or_else(|| {
+                    let (width, _) = island_size(&win);
+                    let monitor_width = monitor_size(&win).map_or(width, |m| m.0);
+                    island_position::centered(width, monitor_width)
+                });
+                pos.set(Some(current));
+                applied.set(current);
+                requested.set(current);
+                layer.place(Some(current));
+                grip.set_cursor_from_name(Some("grabbing"));
+                return;
+            }
             let base = applied.get();
             let mut target = IslandPos {
                 x: base.x + dx.round() as i32,
@@ -374,9 +364,12 @@ fn install_island_drag(
     }
     {
         let pos = pos.clone();
-        let handle_ref = handle.clone();
+        let grip = grip.clone();
         drag.connect_drag_end(move |_, _, _| {
-            handle_ref.set_cursor_from_name(Some("grab"));
+            if !dragging.replace(false) {
+                return;
+            }
+            grip.set_cursor_from_name(Some("grab"));
             if let Some(p) = pos.get() {
                 if let Err(err) = island_position::save(p) {
                     eprintln!("[HyperGSR] Could not save island position: {err}");
@@ -384,7 +377,7 @@ fn install_island_drag(
             }
         });
     }
-    handle.add_controller(drag);
+    bar.add_controller(drag);
 
     let recenter = GestureClick::new();
     recenter.set_button(gdk4::BUTTON_PRIMARY);
@@ -395,7 +388,7 @@ fn install_island_drag(
             island_position::forget();
         }
     });
-    handle.add_controller(recenter);
+    grip.add_controller(recenter);
 
     keep_on_screen
 }
@@ -484,9 +477,9 @@ fn load_dynamic_island_css() {
         }
 
         button.lens-pill {
-            background-color: rgba(99, 102, 241, 0.14);
-            border: 1px solid rgba(129, 140, 248, 0.30);
-            color: #c7d2fe;
+            background-color: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            color: #d4d4d8;
             font-family: "Inter Variable", "Inter", sans-serif;
             font-feature-settings: "tnum", "cv11";
             font-size: 10.5px;
@@ -536,9 +529,9 @@ fn load_dynamic_island_css() {
             padding: 4px 10px;
         }
         button.studio-pill-open {
-            background-color: rgba(99, 102, 241, 0.24);
-            border: 1px solid rgba(129, 140, 248, 0.45);
-            color: #e0e7ff;
+            background-color: rgba(255, 255, 255, 0.13);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            color: #ffffff;
             padding: 4px 10px;
         }
 
@@ -604,8 +597,8 @@ fn load_dynamic_island_css() {
             background-color: rgba(255, 255, 255, 0.04);
         }
         button.seg-btn-active {
-            background-color: #4f46e5;
-            border: 1px solid rgba(165, 180, 252, 0.40);
+            background-color: rgba(255, 255, 255, 0.13);
+            border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 8px;
             color: #ffffff;
             font-size: 10.5px;
@@ -634,16 +627,16 @@ fn load_dynamic_island_css() {
         }
 
         button.action-chip {
-            background-color: rgba(99, 102, 241, 0.16);
-            border: 1px solid rgba(129, 140, 248, 0.32);
+            background-color: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.10);
             border-radius: 9px;
-            color: #c7d2fe;
+            color: #e4e4e7;
             font-size: 10.5px;
             font-weight: 700;
             padding: 4px 10px;
         }
         button.action-chip:hover {
-            background-color: rgba(99, 102, 241, 0.28);
+            background-color: rgba(255, 255, 255, 0.11);
             color: #ffffff;
         }
 
@@ -690,9 +683,9 @@ fn load_dynamic_island_css() {
             color: #0f172a;
         }
         .theme-light button.lens-pill {
-            background-color: rgba(79, 70, 229, 0.10);
-            border: 1px solid rgba(79, 70, 229, 0.25);
-            color: #4338ca;
+            background-color: rgba(15, 23, 42, 0.05);
+            border: 1px solid rgba(15, 23, 42, 0.10);
+            color: #334155;
         }
         .theme-light button.lens-pill-zoomed {
             background-color: rgba(16, 185, 129, 0.15);
@@ -710,9 +703,9 @@ fn load_dynamic_island_css() {
             color: #be123c;
         }
         .theme-light button.studio-pill-open {
-            background-color: rgba(79, 70, 229, 0.14);
-            border: 1px solid rgba(79, 70, 229, 0.35);
-            color: #3730a3;
+            background-color: #ffffff;
+            border: 1px solid rgba(15, 23, 42, 0.16);
+            color: #0f172a;
         }
         .theme-light .island-drawer {
             border-top: 1px solid rgba(15, 23, 42, 0.08);
@@ -735,8 +728,8 @@ fn load_dynamic_island_css() {
             color: #475569;
         }
         .theme-light button.seg-btn-active {
-            background-color: #4f46e5;
-            color: #ffffff;
+            background-color: #ffffff;
+            color: #0f172a;
         }
         .theme-light button.toggle-chip {
             background-color: #f1f5f9;
@@ -749,9 +742,9 @@ fn load_dynamic_island_css() {
             color: #065f46;
         }
         .theme-light button.action-chip {
-            background-color: rgba(79, 70, 229, 0.12);
-            border: 1px solid rgba(79, 70, 229, 0.28);
-            color: #4338ca;
+            background-color: rgba(15, 23, 42, 0.05);
+            border: 1px solid rgba(15, 23, 42, 0.12);
+            color: #1e293b;
         }
         .theme-light .status-strip {
             border-top: 1px solid rgba(15, 23, 42, 0.08);
@@ -821,9 +814,9 @@ button.pause-pill-on {
 button.seg-btn { font-weight: 560; border-radius: 8px; }
 button.seg-btn-active {
     font-weight: 620;
-    background-image: linear-gradient(180deg, #6d70f5, #4f46e5);
-    border-color: rgba(199, 210, 254, 0.35);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0));
+    border-color: rgba(255, 255, 255, 0.14);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 button.shutter-rec {
     font-weight: 620;
@@ -846,7 +839,7 @@ button.seg-btn { color: #c3c9d4; }
 button.seg-btn:hover { color: #ffffff; }
 button.action-chip, button.toggle-chip, button.toggle-chip-on { font-size: 12px; padding: 5px 10px; }
 button.toggle-chip { color: #c3c9d4; }
-button.action-chip { color: #dbe1ff; }
+button.action-chip { color: #e4e4e7; }
 button.lens-pill, button.lens-pill-zoomed { font-size: 11.5px; }
 .island-title, .island-timer-rec { font-size: 12.5px; }
 .section-cap { font-size: 10.5px; color: #aab3c0; }
@@ -857,7 +850,7 @@ button.lens-pill, button.lens-pill-zoomed { font-size: 11.5px; }
 
 .theme-light button.seg-btn { color: #3f4b5c; }
 .theme-light button.toggle-chip { color: #475569; }
-.theme-light button.action-chip { color: #3730a3; }
+.theme-light button.action-chip { color: #1e293b; }
 .theme-light .section-cap { color: #5b6677; }
 .theme-light .panel-hint, .theme-light .status-strip { color: #4b5563; }
 
@@ -876,8 +869,9 @@ button.lens-pill, button.lens-pill-zoomed { font-size: 11.5px; }
 }
 .theme-light button.seg-btn:hover { background-color: rgba(15, 23, 42, 0.06); }
 .theme-light button.seg-btn-active {
-    background-image: linear-gradient(180deg, #6366f1, #4f46e5);
-    border-color: rgba(67, 56, 202, 0.5);
+    background-image: none;
+    border-color: rgba(15, 23, 42, 0.10);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
 }
 "#;
 
@@ -1070,7 +1064,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 } else if zoom > 1.06 {
                     cr.set_source_rgb(0.08, 0.75, 0.52);
                 } else {
-                    cr.set_source_rgb(0.38, 0.40, 0.94);
+                    cr.set_source_rgb(0.62, 0.65, 0.72);
                 }
                 draw_rounded_rect(cr, x, y, 2.8, bar_h, 1.4);
                 cr.fill().ok();
@@ -1193,7 +1187,13 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     top_row.append(&expand_btn);
     top_row.append(&close_btn);
 
-    shell_box.append(&top_row);
+    if layer_shell.is_some() {
+        shell_box.append(&top_row);
+    } else {
+        let handle = gtk4::WindowHandle::new();
+        handle.set_child(Some(&top_row));
+        shell_box.append(&handle);
+    }
 
     // =========================================================================
     // COMPACT VERTICAL STUDIO POPOVER (Exact same ~372px width as Top Bar!)
@@ -1333,7 +1333,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
                 draw_rounded_rect(cr, vx, vy, vw, vh, 5.0);
                 cr.stroke().ok();
             } else {
-                cr.set_source_rgba(0.38, 0.40, 0.95, 0.45);
+                cr.set_source_rgba(0.58, 0.62, 0.70, 0.5);
                 cr.set_line_width(1.1);
                 draw_rounded_rect(cr, vx + 1.0, vy + 1.0, vw - 2.0, vh - 2.0, 7.0);
                 cr.stroke().ok();
@@ -1379,7 +1379,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
 
             let hist = z_hist.borrow();
             if hist.len() >= 2 {
-                cr.set_source_rgba(0.31, 0.27, 0.90, 0.95);
+                cr.set_source_rgba(0.98, 0.75, 0.14, 0.95);
                 cr.set_line_width(1.6);
                 for (idx, &z_val) in hist.iter().enumerate() {
                     let px = (idx as f64 / (hist.len() - 1).max(1) as f64) * (w - 8.0) + 4.0;
@@ -2206,7 +2206,7 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
         });
     }
     window.set_child(Some(&shell_box));
-    let keep_island_on_screen = install_island_drag(&window, &brand_box, layer_shell);
+    let keep_island_on_screen = install_island_drag(&window, &top_row, &brand_box, layer_shell);
 
     // =========================================================================
     // MORPHING & NON-BLOCKING RECORDING HANDLERS
@@ -3063,4 +3063,11 @@ fn build_dynamic_island(app: &Application, state: SharedStudioState) {
     }
 
     window.present();
+
+    if std::env::var("HYPERGSR_SELECT_AREA").as_deref() == Ok("1") {
+        let app = app.clone();
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            crate::region_select::select_region(&app, |region| println!("[HyperGSR] area: {region:?}"));
+        });
+    }
 }

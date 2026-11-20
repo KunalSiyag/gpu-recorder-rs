@@ -19,8 +19,8 @@ button.swatch {
     background-color: transparent;
 }
 button.swatch:hover { border-color: rgba(255, 255, 255, 0.25); }
-button.swatch-active { border-color: #818cf8; }
-.theme-light button.swatch-active { border-color: #4f46e5; }
+button.swatch-active { border-color: #f4f4f5; }
+.theme-light button.swatch-active { border-color: #0f172a; }
 .panel-hint {
     font-size: 9.5px;
     color: #94a3b8;

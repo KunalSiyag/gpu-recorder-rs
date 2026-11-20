@@ -35,12 +35,14 @@ headerbar.editor-header .title { font-weight: 650; color: #f1f5f9; }
 .editor-label { font-size: 11.5px; font-weight: 650; color: #aab3c0; min-width: 76px; }
 .editor-note { font-size: 11px; color: #8b93a1; }
 button.export-btn {
-    background-image: linear-gradient(180deg, #6d70f5, #4f46e5);
-    border-color: rgba(199, 210, 254, 0.35);
-    color: #ffffff;
+    background-image: none;
+    background-color: #f4f4f5;
+    border-color: transparent;
+    color: #0c0e13;
     font-weight: 650;
     padding: 6px 20px;
 }
+button.export-btn:hover { background-color: #ffffff; color: #0c0e13; }
 button.export-btn:disabled { opacity: 0.5; }
 progressbar.editor-progress trough {
     min-height: 6px;
@@ -50,7 +52,7 @@ progressbar.editor-progress trough {
 progressbar.editor-progress progress {
     min-height: 6px;
     border-radius: 3px;
-    background-color: #818cf8;
+    background-color: #fbbf24;
 }
 dropdown.editor-drop button { padding: 3px 10px; }
 "#;

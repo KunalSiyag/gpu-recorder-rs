@@ -2,13 +2,20 @@
 //!
 //! The overlay covers one monitor; the chosen rectangle is stored normalized
 //! to that monitor and cropped out of the captured screen by FFmpeg.
+//!
+//! With layer-shell the overlay is see-through. Without it (sandboxed apps on
+//! COSMIC, GNOME) it has to be a fullscreen window, which compositors back
+//! with an opaque fill, so a still of the screen from the Screenshot portal
+//! is drawn underneath instead.
 
 use crate::settings::Region;
 use glib::object::ObjectType;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, DrawingArea, EventControllerKey, GestureClick, GestureDrag};
+use gtk4::cairo::{Format, ImageSurface};
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_void, CString};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 #[derive(Default)]
@@ -23,6 +30,95 @@ impl Selection {
         let (ex, ey) = self.end;
         Some((sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs()))
     }
+}
+
+type ScreenshotDone = Box<dyn FnOnce(Option<PathBuf>)>;
+
+/// Asks the Screenshot portal for a still of the screen, without its dialog,
+/// and passes the saved PNG to `done` (`None` when the portal refuses).
+fn portal_screenshot(done: impl FnOnce(Option<PathBuf>) + 'static) {
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+        return done(None);
+    };
+    let Some(sender) = bus.unique_name() else {
+        return done(None);
+    };
+    let token = format!("hypergsr_area_{}", std::process::id());
+    let request = format!(
+        "/org/freedesktop/portal/desktop/request/{}/{token}",
+        sender.trim_start_matches(':').replace('.', "_")
+    );
+    // Taken by whichever comes first: the portal's answer or a failed call.
+    let done: Rc<RefCell<Option<ScreenshotDone>>> = Rc::new(RefCell::new(Some(Box::new(done))));
+    let subscription = Rc::new(RefCell::new(None));
+    {
+        let done = done.clone();
+        let sub = subscription.clone();
+        *subscription.borrow_mut() = Some(bus.subscribe_to_signal(
+            Some("org.freedesktop.portal.Desktop"),
+            Some("org.freedesktop.portal.Request"),
+            Some("Response"),
+            Some(&request),
+            None,
+            gio::DBusSignalFlags::NONE,
+            move |signal| {
+                let path = signal
+                    .parameters
+                    .get::<(u32, glib::VariantDict)>()
+                    .filter(|(code, _)| *code == 0)
+                    .and_then(|(_, results)| results.lookup::<String>("uri").ok().flatten())
+                    .and_then(|uri| gio::File::for_uri(&uri).path());
+                if let Some(done) = done.borrow_mut().take() {
+                    done(path);
+                }
+                let sub = sub.clone();
+                glib::idle_add_local_once(move || drop(sub.borrow_mut().take()));
+            },
+        ));
+    }
+    let options = glib::VariantDict::new(None);
+    options.insert("handle_token", &token);
+    options.insert("interactive", false);
+    options.insert("modal", false);
+    bus.call(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Screenshot",
+        "Screenshot",
+        Some(&glib::Variant::tuple_from_iter(["".to_variant(), options.end()])),
+        None,
+        gio::DBusCallFlags::NONE,
+        -1,
+        gio::Cancellable::NONE,
+        move |result| {
+            if result.is_err() {
+                subscription.borrow_mut().take();
+                if let Some(done) = done.borrow_mut().take() {
+                    done(None);
+                }
+            }
+        },
+    );
+}
+
+/// Loads the portal's PNG for cairo, and deletes it when it is one of
+/// COSMIC's temporary screenshots (GNOME saves into Pictures; those stay).
+fn load_backdrop(path: &std::path::Path) -> Option<ImageSurface> {
+    let texture = gdk4::Texture::from_filename(path).ok();
+    let temporary = path.starts_with("/tmp")
+        || (path.starts_with("/run/user")
+            && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("screenshot-")));
+    if temporary {
+        let _ = std::fs::remove_file(path);
+    }
+    let texture = texture?;
+    let (w, h) = (texture.width(), texture.height());
+    let stride = Format::ARgb32.stride_for_width(w as u32).ok()?;
+    // GDK's default download format is premultiplied BGRA, which is cairo's
+    // ARGB32 on little-endian machines.
+    let mut data = vec![0u8; stride as usize * h as usize];
+    texture.download(&mut data, stride as usize);
+    ImageSurface::create_for_data(data, Format::ARgb32, w, h, stride).ok()
 }
 
 fn place_overlay(window: &ApplicationWindow) {
@@ -47,6 +143,20 @@ fn place_overlay(window: &ApplicationWindow) {
 /// Opens the overlay; `on_done` receives the region, or `None` when the user
 /// cancels with Esc or a right click.
 pub fn select_region(app: &Application, on_done: impl Fn(Option<Region>) + 'static) {
+    if crate::gui::layer_api().is_some() {
+        return open_overlay(app, None, on_done);
+    }
+    let app = app.clone();
+    portal_screenshot(move |path| {
+        let backdrop = path.as_deref().and_then(load_backdrop);
+        if backdrop.is_none() {
+            eprintln!("[HyperGSR] Screenshot portal gave no image; the area picker has no preview");
+        }
+        open_overlay(&app, backdrop, on_done);
+    });
+}
+
+fn open_overlay(app: &Application, backdrop: Option<ImageSurface>, on_done: impl Fn(Option<Region>) + 'static) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("HyperGSR Region")
@@ -89,6 +199,14 @@ pub fn select_region(app: &Application, on_done: impl Fn(Option<Region>) + 'stat
         area.set_draw_func(move |_, cr, w, h| {
             let (w, h) = (w as f64, h as f64);
             let sel = sel.borrow();
+            if let Some(shot) = &backdrop {
+                cr.save().ok();
+                cr.scale(w / shot.width().max(1) as f64, h / shot.height().max(1) as f64);
+                cr.set_source_surface(shot, 0.0, 0.0).ok();
+                cr.source().set_filter(gtk4::cairo::Filter::Good);
+                cr.paint().ok();
+                cr.restore().ok();
+            }
             cr.set_source_rgba(0.02, 0.02, 0.05, 0.55);
             cr.rectangle(0.0, 0.0, w, h);
             if let Some((x, y, rw, rh)) = sel.rect() {
